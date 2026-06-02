@@ -1,0 +1,9 @@
+<Application x:Class="Key2Gif.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:Key2Gif"
+             ShutdownMode="OnExplicitShutdown">
+    <Application.Resources>
+         
+    </Application.Resources>
+</Application>
