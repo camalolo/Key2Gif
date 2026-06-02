@@ -7,6 +7,7 @@ namespace Key2Gif.Services;
 public class RecentGifEntry
 {
     public string PreviewUrl { get; set; } = "";
+    public string TinyUrl { get; set; } = "";
     public string FullUrl { get; set; } = "";
     public string Title { get; set; } = "";
 }

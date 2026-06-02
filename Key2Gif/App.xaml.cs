@@ -26,11 +26,19 @@ public partial class App : Application
         // Global exception handlers so crashes get logged
         AppDomain.CurrentDomain.UnhandledException += (s, args) =>
         {
+            if (args.ExceptionObject is ArgumentOutOfRangeException)
+            {
+                Log.Error("Suppressed WPF Freezable crash", args.ExceptionObject as Exception);
+                return;
+            }
             Log.Error("Unhandled exception", args.ExceptionObject as Exception);
         };
         DispatcherUnhandledException += (s, args) =>
         {
             Log.Error("Dispatcher unhandled exception", args.Exception);
+            // Suppress known WPF Freezable crash from async bitmap download on detached visuals
+            if (args.Exception is ArgumentOutOfRangeException)
+                args.Handled = true;
         };
         TaskScheduler.UnobservedTaskException += (s, args) =>
         {
@@ -103,15 +111,15 @@ public partial class App : Application
 
     private System.Windows.Media.ImageSource CreateIcon()
     {
-        var drawing = new GeometryDrawing
-        {
-            Brush = System.Windows.Media.Brushes.Gold,
-            Geometry = Geometry.Parse("M10,2 C5.6,2 2,5.6 2,10 C2,14.4 5.6,18 10,18 C14.4,18 18,14.4 18,10 C18,5.6 14.4,2 10,2 Z M7,9 C6.4,9 6,8.6 6,8 C6,7.4 6.4,7 7,7 C7.6,7 8,7.4 8,8 C8,8.6 7.6,9 7,9 Z M13,9 C12.4,9 12,8.6 12,8 C12,7.4 12.4,7 13,7 C13.6,7 14,7.4 14,8 C14,8.6 13.6,9 13,9 Z M13.5,12.5 C13.1,13 11.5,14 10,14 C8.5,14 6.9,13 6.5,12.5"),
-        };
-
-        var drawingImage = new DrawingImage(drawing);
-        drawingImage.Freeze();
-        return drawingImage;
+        var uri = new Uri("pack://application:,,,/icon.png");
+        var bitmap = new System.Windows.Media.Imaging.BitmapImage();
+        bitmap.BeginInit();
+        bitmap.UriSource = uri;
+        bitmap.DecodePixelWidth = 32;
+        bitmap.CacheOption = System.Windows.Media.Imaging.BitmapCacheOption.OnLoad;
+        bitmap.EndInit();
+        bitmap.Freeze();
+        return bitmap;
     }
 
     private void ShutdownApp()

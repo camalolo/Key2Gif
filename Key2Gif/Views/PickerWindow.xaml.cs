@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
@@ -63,11 +64,17 @@ public partial class PickerWindow : Window
         RefreshContent();
     }
 
+    private POINT _savedMousePos;
+    private bool _hasMousePos;
+
     public void ShowPicker()
     {
         // Remember which window had focus before we show ourselves
         _lastForegroundWindow = GetForegroundWindow();
         Log.Info($"Saved foreground window: 0x{_lastForegroundWindow.ToInt64():X}");
+
+        // Capture mouse position BEFORE showing our window (more accurate)
+        _hasMousePos = GetCursorPos(out _savedMousePos);
 
         // Reset state
         SearchBox.Text = "";
@@ -115,46 +122,84 @@ public partial class PickerWindow : Window
 
     private void PositionNearCaret()
     {
+        Point? caretScreen = null;
+
+        // Strategy 1: GetGUIThreadInfo caret position (works: Win32, Office, WPF, Notepad)
         try
         {
             var info = new GUITHREADINFO { cbSize = Marshal.SizeOf<GUITHREADINFO>() };
             if (GetGUIThreadInfo(0, ref info) && info.hwndCaret != IntPtr.Zero)
             {
-                var caretRect = info.rcCaret;
-                var caretPoint = new System.Drawing.Point(
-                    caretRect.Left + caretRect.Width / 2,
-                    caretRect.Top + caretRect.Height);
-                
-                var screenPoint = new POINT { X = caretPoint.X, Y = caretPoint.Y };
-                ClientToScreen(info.hwndCaret, ref screenPoint);
-
-                double x = screenPoint.X;
-                double y = screenPoint.Y + 10;
-
-                var screen = SystemParameters.WorkArea;
-                if (x + Width > screen.Right) x = screen.Right - Width;
-                if (y + Height > screen.Bottom) y = screen.Bottom - Height;
-                if (x < screen.Left) x = screen.Left;
-                if (y < screen.Top) y = screen.Top;
-
-                Left = x;
-                Top = y;
-                return;
+                var cr = info.rcCaret;
+                var pt = new POINT { X = cr.Left + cr.Width / 2, Y = cr.Top + cr.Height };
+                ClientToScreen(info.hwndCaret, ref pt);
+                caretScreen = new Point(pt.X, pt.Y + 8);
+                Log.Info($"Caret position from GetGUIThreadInfo: ({pt.X}, {pt.Y})");
             }
         }
         catch { }
 
-        // Fallback: position near mouse cursor
-        GetCursorPos(out var pt);
-        var workArea = SystemParameters.WorkArea;
-        double mx = pt.X;
-        double my = pt.Y + 20;
-        if (mx + Width > workArea.Right) mx = workArea.Right - Width;
-        if (my + Height > workArea.Bottom) my = workArea.Bottom - Height;
-        if (mx < workArea.Left) mx = workArea.Left;
-        if (my < workArea.Top) my = workArea.Top;
-        Left = mx;
-        Top = my;
+        // Strategy 2: GetGUIThreadInfo focused element position (works: some apps without caret)
+        if (caretScreen == null)
+        {
+            try
+            {
+                var info = new GUITHREADINFO { cbSize = Marshal.SizeOf<GUITHREADINFO>() };
+                if (GetGUIThreadInfo(0, ref info) && info.hwndFocus != IntPtr.Zero)
+                {
+                    GetWindowRect(info.hwndFocus, out var focusRect);
+                    // Position at bottom-center of focused control
+                    caretScreen = new Point(
+                        (focusRect.Left + focusRect.Right) / 2.0,
+                        focusRect.Bottom + 4);
+                    Log.Info($"Focus rect position: ({focusRect.Left},{focusRect.Top})-({focusRect.Right},{focusRect.Bottom})");
+                }
+            }
+            catch { }
+        }
+
+        // Strategy 3: Saved mouse position from before window was shown
+        if (caretScreen == null && _hasMousePos)
+        {
+            caretScreen = new Point(_savedMousePos.X, _savedMousePos.Y + 16);
+            Log.Info($"Using saved mouse position: ({_savedMousePos.X}, {_savedMousePos.Y})");
+        }
+
+        // Strategy 4: Center of foreground window
+        if (caretScreen == null && _lastForegroundWindow != IntPtr.Zero)
+        {
+            GetWindowRect(_lastForegroundWindow, out var fgRect);
+            caretScreen = new Point(
+                (fgRect.Left + fgRect.Right) / 2.0 - Width / 2,
+                (fgRect.Top + fgRect.Bottom) / 2.0 - Height / 2);
+            Log.Info($"Using foreground window center");
+        }
+
+        // Strategy 5: Screen center
+        if (caretScreen == null)
+        {
+            var wa = SystemParameters.WorkArea;
+            caretScreen = new Point(
+                (wa.Left + wa.Right) / 2.0 - Width / 2,
+                (wa.Top + wa.Bottom) / 2.0 - Height / 2);
+        }
+
+        // Clamp to screen work area
+        var screen = SystemParameters.WorkArea;
+        double x = caretScreen.Value.X;
+        double y = caretScreen.Value.Y;
+
+        if (x + Width > screen.Right) x = screen.Right - Width;
+        if (x < screen.Left) x = screen.Left;
+
+        // If picker would go below screen, try placing it above the anchor instead
+        if (y + Height > screen.Bottom)
+            y = caretScreen.Value.Y - Height - 16;
+        if (y + Height > screen.Bottom) y = screen.Bottom - Height;
+        if (y < screen.Top) y = screen.Top;
+
+        Left = x;
+        Top = y;
     }
 
     [DllImport("user32.dll")]
@@ -165,6 +210,15 @@ public partial class PickerWindow : Window
 
     [DllImport("user32.dll")]
     private static extern bool GetCursorPos(out POINT lpPoint);
+
+    [DllImport("user32.dll")]
+    private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT
+    {
+        public int Left, Top, Right, Bottom;
+    }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct POINT
@@ -208,28 +262,24 @@ public partial class PickerWindow : Window
         CleanupGifPanel(RecentGifPanel);
         foreach (var gif in _recentTracker.RecentGifs)
         {
-            RecentGifPanel.Children.Add(CreateGifElement(gif.PreviewUrl, gif));
+            RecentGifPanel.Children.Add(CreateGifElement(gif.PreviewUrl, gif.TinyUrl, gif));
         }
     }
 
     private void CleanupGifPanel(WrapPanel panel)
     {
-        foreach (var child in panel.Children.OfType<Border>())
-        {
-            if (child.Child is Image img) img.Source = null;
-        }
         panel.Children.Clear();
     }
 
-    private UIElement CreateGifElement(string previewUrl, object tag)
+    private UIElement CreateGifElement(string previewUrl, string? tinyUrl, object tag)
     {
         var outerBorder = new Border
         {
             Width = 100,
             Height = 75,
-            Margin = new Thickness(4),
-            Background = new SolidColorBrush(Color.FromArgb(0x30, 0xFF, 0xFF, 0xFF)),
-            CornerRadius = new CornerRadius(6),
+            Margin = new Thickness(3),
+            Background = new SolidColorBrush(Color.FromArgb(0x18, 0xFF, 0xFF, 0xFF)),
+            CornerRadius = new CornerRadius(4),
             ClipToBounds = true,
             Cursor = Cursors.Hand,
             Tag = tag
@@ -241,36 +291,24 @@ public partial class PickerWindow : Window
         };
         RenderOptions.SetBitmapScalingMode(img, BitmapScalingMode.HighQuality);
 
+        var url = !string.IsNullOrEmpty(tinyUrl) ? tinyUrl : previewUrl;
+
         try
         {
             var bitmap = new BitmapImage();
             bitmap.BeginInit();
-            bitmap.UriSource = new Uri(previewUrl);
-            bitmap.CacheOption = BitmapCacheOption.OnLoad;
+            bitmap.UriSource = new Uri(url);
             bitmap.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
             bitmap.EndInit();
-            if (bitmap.IsDownloading)
-            {
-                bitmap.DownloadCompleted += (_, _) =>
-                    Dispatcher.BeginInvoke(() => { try { bitmap.Freeze(); img.Source = bitmap; } catch { } });
-                bitmap.DownloadFailed += (_, _) =>
-                    Dispatcher.BeginInvoke(() => { try { bitmap.Freeze(); } catch { } });
-            }
-            else
-            {
-                bitmap.Freeze();
-                img.Source = bitmap;
-            }
+            WpfAnimatedGif.ImageBehavior.SetAnimatedSource(img, bitmap);
+            WpfAnimatedGif.ImageBehavior.SetAutoStart(img, true);
         }
-        catch (Exception ex)
-        {
-            Log.Error($"Failed to load GIF preview: {ex.Message}");
-        }
+        catch { }
 
         outerBorder.Child = img;
 
         // Hover effect
-        outerBorder.MouseEnter += (s, e) => outerBorder.BorderBrush = new SolidColorBrush(Color.FromArgb(0x80, 0xFF, 0xFF, 0xFF));
+        outerBorder.MouseEnter += (s, e) => outerBorder.BorderBrush = new SolidColorBrush(Color.FromArgb(0x50, 0xFF, 0xFF, 0xFF));
         outerBorder.MouseLeave += (s, e) => outerBorder.BorderBrush = Brushes.Transparent;
 
         return outerBorder;
@@ -391,7 +429,7 @@ public partial class PickerWindow : Window
         CleanupGifPanel(GifPanel);
         foreach (var gif in _allGifs)
         {
-            GifPanel.Children.Add(CreateGifElement(gif.PreviewUrl, gif));
+            GifPanel.Children.Add(CreateGifElement(gif.PreviewUrl, gif.TinyUrl, gif));
         }
         BtnLoadMore.Visibility = _allGifs.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
 
@@ -440,6 +478,7 @@ public partial class PickerWindow : Window
         _recentTracker.AddGif(new RecentGifEntry
         {
             PreviewUrl = gif.PreviewUrl,
+            TinyUrl = gif.TinyUrl,
             FullUrl = gif.FullUrl,
             Title = gif.Title
         });
