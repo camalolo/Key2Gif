@@ -17,6 +17,5 @@ if %ERRORLEVEL% NEQ 0 (
 REM Step 2: Copy to E:\Apps
 echo Copying to E:\Apps...
 copy /Y %PUBLISH_DIR%\Key2Gif.exe E:\Apps\
-copy /Y %PUBLISH_DIR%\*.dll E:\Apps\
 
 echo Done.

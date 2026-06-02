@@ -11,13 +11,14 @@ namespace Key2Gif.Services;
 public class GifService
 {
     private readonly HttpClient _httpClient;
-    private const string ApiKey = "REDACTED";
     private const string BaseUrl = "https://api.giphy.com/v1/gifs";
+    private readonly string _apiKey;
     private int _totalCount;
     private int _offset;
 
-    public GifService()
+    public GifService(string apiKey)
     {
+        _apiKey = apiKey;
         _httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
     }
 
@@ -26,7 +27,7 @@ public class GifService
 
     public async Task<List<GifResult>> SearchAsync(string query, int limit = 20, int offset = 0)
     {
-        var url = $"{BaseUrl}/search?api_key={ApiKey}&q={Uri.EscapeDataString(query)}&limit={limit}&offset={offset}&rating=pg-13";
+        var url = $"{BaseUrl}/search?api_key={_apiKey}&q={Uri.EscapeDataString(query)}&limit={limit}&offset={offset}&rating=pg-13";
         Log.Info($"GIPHY API request: {url}");
 
         var response = await _httpClient.GetStringAsync(url);
@@ -77,7 +78,7 @@ public class GifService
 
     public async Task<List<GifResult>> GetTrendingAsync(int limit = 20, int offset = 0)
     {
-        var url = $"{BaseUrl}/trending?api_key={ApiKey}&limit={limit}&offset={offset}&rating=pg-13";
+        var url = $"{BaseUrl}/trending?api_key={_apiKey}&limit={limit}&offset={offset}&rating=pg-13";
         Log.Info($"GIPHY trending request: {url}");
 
         var response = await _httpClient.GetStringAsync(url);

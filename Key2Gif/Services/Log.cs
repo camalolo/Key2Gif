@@ -21,6 +21,11 @@ public static class Log
         Write("ERROR", message + (ex != null ? $"\n{ex}" : ""));
     }
 
+    public static void Warning(string message)
+    {
+        Write("WARN", message);
+    }
+
     private static void Write(string level, string message)
     {
         try

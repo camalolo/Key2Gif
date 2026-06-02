@@ -46,7 +46,18 @@ public partial class App : Application
         };
 
         // Create services
-        _gifService = new GifService();
+        var settings = Models.AppSettings.Load();
+        Log.Info($"Settings loaded from {Models.AppSettings.SettingsPath ?? "(new)"}");
+
+        var giphyKey = settings.GiphyApiKey;
+        if (string.IsNullOrEmpty(giphyKey))
+        {
+            // GIPHY public SDK key (published in official docs/examples)
+            giphyKey = "REDACTED";
+            Log.Info("Using GIPHY public SDK key. For higher limits, add your own key to " + Models.AppSettings.SettingsPath);
+        }
+
+        _gifService = new GifService(giphyKey);
         _recentTracker = new RecentTracker();
         Log.Info("Services initialized");
 
