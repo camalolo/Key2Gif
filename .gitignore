@@ -1,14 +1,23 @@
-## Build results
-**/bin/
-**/obj/
-*.user
-*.suo
-
-## Logs
-run.log
-*.log
+## Build artifacts
+bin/
+obj/
+publish/
 
 ## IDE
 .vs/
+.vscode/
 .idea/
+*.user
+*.suo
 *.sln
+
+## Krush
+.krush/
+
+## OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+## Runtime
+*.log
