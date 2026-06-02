@@ -1,4 +1,5 @@
 using System;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -13,7 +14,6 @@ public partial class App : Application
     private HotkeyService? _hotkeyService;
     private PickerWindow? _pickerWindow;
     private TaskbarIcon? _trayIcon;
-    private EmojiDatabase? _emojiDb;
     private GifService? _gifService;
     private RecentTracker? _recentTracker;
 
@@ -23,18 +23,28 @@ public partial class App : Application
 
         Log.Info("=== Key2Gif Starting ===");
 
-        // Create services
-        Log.Info("Loading emoji database...");
-        _emojiDb = new EmojiDatabase();
-        Log.Info($"Loaded {_emojiDb.Categories.Sum(c => c.Emojis.Count)} emojis in {_emojiDb.Categories.Count} categories");
+        // Global exception handlers so crashes get logged
+        AppDomain.CurrentDomain.UnhandledException += (s, args) =>
+        {
+            Log.Error("Unhandled exception", args.ExceptionObject as Exception);
+        };
+        DispatcherUnhandledException += (s, args) =>
+        {
+            Log.Error("Dispatcher unhandled exception", args.Exception);
+        };
+        TaskScheduler.UnobservedTaskException += (s, args) =>
+        {
+            Log.Error("Unobserved task exception", args.Exception);
+        };
 
+        // Create services
         _gifService = new GifService();
         _recentTracker = new RecentTracker();
         Log.Info("Services initialized");
 
         // Create the picker window (hidden initially)
         Log.Info("Creating picker window...");
-        _pickerWindow = new PickerWindow(_emojiDb, _gifService, _recentTracker);
+        _pickerWindow = new PickerWindow(_gifService, _recentTracker);
         Log.Info("Picker window created");
 
         // Register global hotkey

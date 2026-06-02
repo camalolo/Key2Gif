@@ -6,6 +6,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Key2Gif.Models;
 using Key2Gif.Services;
@@ -14,12 +15,8 @@ namespace Key2Gif.Views;
 
 public partial class PickerWindow : Window
 {
-    private readonly EmojiDatabase _emojiDb;
     private readonly GifService _gifService;
     private readonly RecentTracker _recentTracker;
-
-    private enum PickerTab { Recent, Emojis, Gifs }
-    private PickerTab _currentTab = PickerTab.Recent;
 
     private IntPtr _lastForegroundWindow;
     private int _gifOffset;
@@ -47,25 +44,23 @@ public partial class PickerWindow : Window
     [DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();
 
-    public PickerWindow(EmojiDatabase emojiDb, GifService gifService, RecentTracker recentTracker)
+    public PickerWindow(GifService gifService, RecentTracker recentTracker)
     {
         InitializeComponent();
 
-        _emojiDb = emojiDb;
         _gifService = gifService;
         _recentTracker = recentTracker;
 
         _searchDebounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
         _searchDebounce.Tick += OnSearchDebounceTick;
 
-        PopulateCategoryStrip();
-        ShowRecentEmojis();
-
         _recentTracker.Changed += () =>
         {
-            if (_currentTab == PickerTab.Recent)
-                Dispatcher.BeginInvoke(ShowRecentEmojis);
+            Dispatcher.BeginInvoke(RefreshContent);
         };
+
+        // Initial content
+        RefreshContent();
     }
 
     public void ShowPicker()
@@ -74,12 +69,9 @@ public partial class PickerWindow : Window
         _lastForegroundWindow = GetForegroundWindow();
         Log.Info($"Saved foreground window: 0x{_lastForegroundWindow.ToInt64():X}");
 
-        // Reset to recent tab
+        // Reset state
         SearchBox.Text = "";
-        TabRecent.IsChecked = true;
-        _currentTab = PickerTab.Recent;
-        ShowRecentEmojis();
-        UpdateVisibility();
+        UpdateSearchPlaceholder();
 
         // Show first (creates PresentationSource), then position
         Show();
@@ -106,6 +98,9 @@ public partial class PickerWindow : Window
         {
             SearchBox.Focus();
         }, DispatcherPriority.Loaded);
+
+        // Load initial content
+        RefreshContent();
     }
 
     public void HidePicker()
@@ -126,20 +121,16 @@ public partial class PickerWindow : Window
             if (GetGUIThreadInfo(0, ref info) && info.hwndCaret != IntPtr.Zero)
             {
                 var caretRect = info.rcCaret;
-                // Convert caret position to screen coordinates
                 var caretPoint = new System.Drawing.Point(
                     caretRect.Left + caretRect.Width / 2,
                     caretRect.Top + caretRect.Height);
                 
-                // ClientToScreen
                 var screenPoint = new POINT { X = caretPoint.X, Y = caretPoint.Y };
                 ClientToScreen(info.hwndCaret, ref screenPoint);
 
-                // Position window near caret
                 double x = screenPoint.X;
-                double y = screenPoint.Y + 10; // A bit below caret
+                double y = screenPoint.Y + 10;
 
-                // Keep on screen
                 var screen = SystemParameters.WorkArea;
                 if (x + Width > screen.Right) x = screen.Right - Width;
                 if (y + Height > screen.Bottom) y = screen.Bottom - Height;
@@ -153,7 +144,7 @@ public partial class PickerWindow : Window
         }
         catch { }
 
-        // Fallback: position near mouse cursor using Win32
+        // Fallback: position near mouse cursor
         GetCursorPos(out var pt);
         var workArea = SystemParameters.WorkArea;
         double mx = pt.X;
@@ -182,98 +173,136 @@ public partial class PickerWindow : Window
         public int Y;
     }
 
-    private void PopulateCategoryStrip()
-    {
-        CategoryPanel.Children.Clear();
-        foreach (var cat in _emojiDb.Categories)
-        {
-            var btn = new RadioButton
-            {
-                Content = cat.Icon,
-                ToolTip = cat.Name,
-                GroupName = "Categories",
-                Style = (Style)FindResource("CategoryButtonStyle"),
-                Tag = cat.Name,
-                FontSize = 20
-            };
-            btn.Checked += OnCategorySelected;
-            CategoryPanel.Children.Add(btn);
-        }
-    }
+    #region Content Refresh
 
-    private void OnCategorySelected(object sender, RoutedEventArgs e)
-    {
-        if (sender is RadioButton btn && btn.Tag is string catName)
-        {
-            var category = _emojiDb.Categories.Find(c => c.Name == catName);
-            if (category != null)
-            {
-                EmojiGrid.ItemsSource = category.Emojis;
-            }
-        }
-    }
-
-    private void OnTabChanged(object sender, RoutedEventArgs e)
-    {
-        if (TabRecent.IsChecked == true) _currentTab = PickerTab.Recent;
-        else if (TabEmojis.IsChecked == true) _currentTab = PickerTab.Emojis;
-        else if (TabGifs.IsChecked == true) _currentTab = PickerTab.Gifs;
-
-        // Guard against calls during InitializeComponent before named elements are ready
-        if (CategoryStrip == null) return;
-        UpdateVisibility();
-
-        if (_currentTab == PickerTab.Recent) ShowRecentEmojis();
-        else if (_currentTab == PickerTab.Emojis) ShowAllEmojis();
-        else if (_currentTab == PickerTab.Gifs) SearchGifs(SearchBox.Text);
-    }
-
-    private void UpdateVisibility()
-    {
-        CategoryStrip.Visibility = _currentTab == PickerTab.Emojis
-            ? Visibility.Visible
-            : Visibility.Collapsed;
-        EmojiGrid.Visibility = _currentTab == PickerTab.Gifs
-            ? Visibility.Collapsed
-            : Visibility.Visible;
-        GifPanel.Visibility = _currentTab == PickerTab.Gifs
-            ? Visibility.Visible
-            : Visibility.Collapsed;
-        BtnLoadMore.Visibility = _currentTab == PickerTab.Gifs && _allGifs.Count > 0
-            ? Visibility.Visible
-            : Visibility.Collapsed;
-    }
-
-    private void ShowRecentEmojis()
-    {
-        var recentCat = _recentTracker.GetRecentCategory(_emojiDb);
-        EmojiGrid.ItemsSource = recentCat.Emojis;
-    }
-
-    private void ShowAllEmojis()
+    private void RefreshContent()
     {
         var query = SearchBox.Text.Trim();
+        UpdateSearchPlaceholder();
+
+        // Update separator label
+        GifSeparatorLabel.Text = string.IsNullOrEmpty(query) ? "Trending GIFs" : "Search Results";
+
+        // --- Recent GIFs section ---
+        var hasRecentGifs = _recentTracker.RecentGifs.Count > 0 && string.IsNullOrEmpty(query);
+        RecentGifSection.Visibility = hasRecentGifs ? Visibility.Visible : Visibility.Collapsed;
+        if (hasRecentGifs)
+        {
+            BuildRecentGifPanel();
+        }
+
+        // --- GIF separator always visible ---
+        GifSeparator.Visibility = Visibility.Visible;
+
+        // --- GIFs ---
         if (string.IsNullOrEmpty(query))
         {
-            // Show first category by default
-            if (_emojiDb.Categories.Count > 0)
-            {
-                EmojiGrid.ItemsSource = _emojiDb.Categories[0].Emojis;
-                // Select the first category button
-                if (CategoryPanel.Children.Count > 0 && CategoryPanel.Children[0] is RadioButton firstBtn)
-                    firstBtn.IsChecked = true;
-            }
+            // Show trending GIFs
+            LoadTrendingGifs();
         }
-        else
+        // else: GIF search is triggered via debounce in OnSearchDebounceTick
+    }
+
+    private void BuildRecentGifPanel()
+    {
+        CleanupGifPanel(RecentGifPanel);
+        foreach (var gif in _recentTracker.RecentGifs)
         {
-            EmojiGrid.ItemsSource = _emojiDb.Search(query);
+            RecentGifPanel.Children.Add(CreateGifElement(gif.PreviewUrl, gif));
         }
     }
+
+    private void CleanupGifPanel(WrapPanel panel)
+    {
+        foreach (var child in panel.Children.OfType<Border>())
+        {
+            if (child.Child is Image img) img.Source = null;
+        }
+        panel.Children.Clear();
+    }
+
+    private UIElement CreateGifElement(string previewUrl, object tag)
+    {
+        var outerBorder = new Border
+        {
+            Width = 100,
+            Height = 75,
+            Margin = new Thickness(4),
+            Background = new SolidColorBrush(Color.FromArgb(0x30, 0xFF, 0xFF, 0xFF)),
+            CornerRadius = new CornerRadius(6),
+            ClipToBounds = true,
+            Cursor = Cursors.Hand,
+            Tag = tag
+        };
+
+        var img = new Image
+        {
+            Stretch = Stretch.UniformToFill
+        };
+        RenderOptions.SetBitmapScalingMode(img, BitmapScalingMode.HighQuality);
+
+        try
+        {
+            var bitmap = new BitmapImage();
+            bitmap.BeginInit();
+            bitmap.UriSource = new Uri(previewUrl);
+            bitmap.CacheOption = BitmapCacheOption.OnLoad;
+            bitmap.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
+            bitmap.EndInit();
+            if (bitmap.IsDownloading)
+            {
+                bitmap.DownloadCompleted += (_, _) =>
+                    Dispatcher.BeginInvoke(() => { try { bitmap.Freeze(); img.Source = bitmap; } catch { } });
+                bitmap.DownloadFailed += (_, _) =>
+                    Dispatcher.BeginInvoke(() => { try { bitmap.Freeze(); } catch { } });
+            }
+            else
+            {
+                bitmap.Freeze();
+                img.Source = bitmap;
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Error($"Failed to load GIF preview: {ex.Message}");
+        }
+
+        outerBorder.Child = img;
+
+        // Hover effect
+        outerBorder.MouseEnter += (s, e) => outerBorder.BorderBrush = new SolidColorBrush(Color.FromArgb(0x80, 0xFF, 0xFF, 0xFF));
+        outerBorder.MouseLeave += (s, e) => outerBorder.BorderBrush = Brushes.Transparent;
+
+        return outerBorder;
+    }
+
+    #endregion
+
+    #region Search
 
     private void OnSearchTextChanged(object sender, TextChangedEventArgs e)
     {
+        UpdateSearchPlaceholder();
         _searchDebounce.Stop();
         _searchDebounce.Start();
+
+        var query = SearchBox.Text.Trim();
+
+        // Update separator label immediately
+        GifSeparatorLabel.Text = string.IsNullOrEmpty(query) ? "Trending GIFs" : "Search Results";
+
+        // Hide recent GIFs section while searching
+        if (!string.IsNullOrEmpty(query))
+        {
+            RecentGifSection.Visibility = Visibility.Collapsed;
+        }
+    }
+
+    private void UpdateSearchPlaceholder()
+    {
+        SearchPlaceholder.Visibility = string.IsNullOrEmpty(SearchBox.Text)
+            ? Visibility.Visible
+            : Visibility.Collapsed;
     }
 
     private void OnSearchDebounceTick(object? sender, EventArgs e)
@@ -281,22 +310,13 @@ public partial class PickerWindow : Window
         _searchDebounce.Stop();
         var query = SearchBox.Text.Trim();
 
-        if (_currentTab == PickerTab.Emojis || _currentTab == PickerTab.Recent)
+        if (string.IsNullOrEmpty(query))
         {
-            if (string.IsNullOrEmpty(query))
-            {
-                if (_currentTab == PickerTab.Recent) ShowRecentEmojis();
-                else ShowAllEmojis();
-            }
-            else
-            {
-                EmojiGrid.ItemsSource = _emojiDb.Search(query);
-                EmojiGrid.Visibility = Visibility.Visible;
-                GifPanel.Visibility = Visibility.Collapsed;
-            }
+            RefreshContent();
         }
-        else if (_currentTab == PickerTab.Gifs)
+        else
         {
+            // Trigger GIF search for the query
             SearchGifs(query);
         }
     }
@@ -307,6 +327,7 @@ public partial class PickerWindow : Window
         {
             Log.Info($"Searching GIFs: '{query}'");
             LoadingText.Visibility = Visibility.Visible;
+            LoadingText.Text = "Loading GIFs...";
             _allGifs.Clear();
             _gifOffset = 0;
             _lastGifQuery = query;
@@ -320,9 +341,7 @@ public partial class PickerWindow : Window
             Log.Info($"GIF search returned {results.Count} results");
             _gifOffset = _gifService.Offset;
             _allGifs.AddRange(results);
-            GifGrid.ItemsSource = null;
-            GifGrid.ItemsSource = _allGifs;
-            BtnLoadMore.Visibility = _allGifs.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+            RefreshGifPanel();
         }
         catch (Exception ex)
         {
@@ -331,9 +350,146 @@ public partial class PickerWindow : Window
         }
         finally
         {
-            LoadingText.Visibility = Visibility.Collapsed;
+            if (_allGifs.Count > 0)
+                LoadingText.Visibility = Visibility.Collapsed;
         }
     }
+
+    private async void LoadTrendingGifs()
+    {
+        // Don't reload if we already have trending GIFs loaded and no query
+        if (_allGifs.Count > 0 && string.IsNullOrEmpty(_lastGifQuery))
+            return;
+
+        try
+        {
+            LoadingText.Visibility = Visibility.Visible;
+            LoadingText.Text = "Loading GIFs...";
+            _allGifs.Clear();
+            _gifOffset = 0;
+            _lastGifQuery = "";
+
+            var results = await _gifService.GetTrendingAsync();
+            _gifOffset = _gifService.Offset;
+            _allGifs.AddRange(results);
+            RefreshGifPanel();
+        }
+        catch (Exception ex)
+        {
+            Log.Error($"Trending GIFs failed: {ex.Message}", ex);
+            LoadingText.Text = $"Error: {ex.Message}";
+        }
+        finally
+        {
+            if (_allGifs.Count > 0)
+                LoadingText.Visibility = Visibility.Collapsed;
+        }
+    }
+
+    private void RefreshGifPanel()
+    {
+        CleanupGifPanel(GifPanel);
+        foreach (var gif in _allGifs)
+        {
+            GifPanel.Children.Add(CreateGifElement(gif.PreviewUrl, gif));
+        }
+        BtnLoadMore.Visibility = _allGifs.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+
+        if (_allGifs.Count > 0)
+            LoadingText.Visibility = Visibility.Collapsed;
+    }
+
+    #endregion
+
+    #region Click Handling (Single Click to Paste)
+
+    private void OnContentClick(object sender, MouseButtonEventArgs e)
+    {
+        // Walk up the visual tree from the original source to find tagged elements
+        var depObj = e.OriginalSource as DependencyObject;
+        while (depObj != null)
+        {
+            if (depObj is FrameworkElement fe)
+            {
+                if (fe.Tag is GifResult gifResult)
+                {
+                    InsertGif(gifResult);
+                    e.Handled = true;
+                    return;
+                }
+
+                if (fe.Tag is RecentGifEntry recentGif)
+                {
+                    InsertRecentGif(recentGif);
+                    e.Handled = true;
+                    return;
+                }
+            }
+
+            depObj = VisualTreeHelper.GetParent(depObj);
+        }
+    }
+
+    #endregion
+
+    #region Insertion
+
+    private void InsertGif(GifResult gif)
+    {
+        // Track in recent GIFs
+        _recentTracker.AddGif(new RecentGifEntry
+        {
+            PreviewUrl = gif.PreviewUrl,
+            FullUrl = gif.FullUrl,
+            Title = gif.Title
+        });
+
+        var targetWindow = _lastForegroundWindow;
+        HidePicker();
+        Dispatcher.BeginInvoke(async () =>
+        {
+            try
+            {
+                await System.Threading.Tasks.Task.Delay(200);
+                SetForegroundWindow(targetWindow);
+                await System.Threading.Tasks.Task.Delay(100);
+                var url = !string.IsNullOrEmpty(gif.FullUrl) ? gif.FullUrl : gif.PreviewUrl;
+                await ClipboardInserter.InsertGifAsync(url);
+            }
+            catch (Exception ex)
+            {
+                Log.Error($"GIF insert failed: {ex.Message}", ex);
+            }
+        }, DispatcherPriority.Background);
+    }
+
+    private void InsertRecentGif(RecentGifEntry recentGif)
+    {
+        // Re-add to move to top of recent list
+        _recentTracker.AddGif(recentGif);
+
+        var targetWindow = _lastForegroundWindow;
+        HidePicker();
+        Dispatcher.BeginInvoke(async () =>
+        {
+            try
+            {
+                await System.Threading.Tasks.Task.Delay(200);
+                SetForegroundWindow(targetWindow);
+                await System.Threading.Tasks.Task.Delay(100);
+                var url = !string.IsNullOrEmpty(recentGif.FullUrl) ? recentGif.FullUrl : recentGif.PreviewUrl;
+                await ClipboardInserter.InsertGifAsync(url);
+            }
+            catch (Exception ex)
+            {
+                Log.Error($"Recent GIF insert failed: {ex.Message}", ex);
+            }
+        }, DispatcherPriority.Background);
+    }
+
+    #endregion
+
+    #region Load More GIFs
 
     private async void OnLoadMoreGifs(object sender, RoutedEventArgs e)
     {
@@ -348,8 +504,7 @@ public partial class PickerWindow : Window
 
             _gifOffset = _gifService.Offset;
             _allGifs.AddRange(results);
-            GifGrid.ItemsSource = null;
-            GifGrid.ItemsSource = _allGifs;
+            RefreshGifPanel();
         }
         catch (Exception ex)
         {
@@ -361,29 +516,9 @@ public partial class PickerWindow : Window
         }
     }
 
-    private void OnEmojiDoubleClicked(object sender, MouseButtonEventArgs e)
-    {
-        InsertSelectedEmoji();
-    }
+    #endregion
 
-    private void OnEmojiKeyDown(object sender, KeyEventArgs e)
-    {
-        if (e.Key == Key.Enter)
-        {
-            InsertSelectedEmoji();
-            e.Handled = true;
-        }
-        else if (e.Key == Key.Escape)
-        {
-            HidePicker();
-            e.Handled = true;
-        }
-    }
-
-    private void OnGifDoubleClicked(object sender, MouseButtonEventArgs e)
-    {
-        InsertSelectedGif();
-    }
+    #region Keyboard Handling
 
     private void OnSearchBoxKeyDown(object sender, KeyEventArgs e)
     {
@@ -392,62 +527,14 @@ public partial class PickerWindow : Window
             HidePicker();
             e.Handled = true;
         }
-        else if (e.Key == Key.Enter && _currentTab == PickerTab.Gifs)
+        else if (e.Key == Key.Enter)
         {
-            // Enter in search triggers GIF search immediately
+            // Enter triggers immediate GIF search
             _searchDebounce.Stop();
-            SearchGifs(SearchBox.Text.Trim());
+            var query = SearchBox.Text.Trim();
+            if (!string.IsNullOrEmpty(query))
+                SearchGifs(query);
             e.Handled = true;
-        }
-        else if (e.Key == Key.Down)
-        {
-            // Move focus to grid
-            if (_currentTab == PickerTab.Gifs)
-                GifGrid.Focus();
-            else
-                EmojiGrid.Focus();
-            e.Handled = true;
-        }
-    }
-
-    private void InsertSelectedEmoji()
-    {
-        if (EmojiGrid.SelectedItem is EmojiItem item)
-        {
-            _recentTracker.Add(item.Emoji);
-            var targetWindow = _lastForegroundWindow;
-            HidePicker();
-            Dispatcher.BeginInvoke(async () =>
-            {
-                await System.Threading.Tasks.Task.Delay(200);
-                SetForegroundWindow(targetWindow);
-                await System.Threading.Tasks.Task.Delay(100);
-                ClipboardInserter.InsertText(item.Emoji);
-            }, DispatcherPriority.Background);
-        }
-    }
-
-    private void InsertSelectedGif()
-    {
-        if (GifGrid.SelectedItem is GifResult gif)
-        {
-            var targetWindow = _lastForegroundWindow;
-            HidePicker();
-            Dispatcher.BeginInvoke(async () =>
-            {
-                try
-                {
-                    await System.Threading.Tasks.Task.Delay(200);
-                    SetForegroundWindow(targetWindow);
-                    await System.Threading.Tasks.Task.Delay(100);
-                    var url = !string.IsNullOrEmpty(gif.FullUrl) ? gif.FullUrl : gif.PreviewUrl;
-                    await ClipboardInserter.InsertGifAsync(url);
-                }
-                catch (Exception ex)
-                {
-                    Log.Error($"GIF insert failed: {ex.Message}", ex);
-                }
-            }, DispatcherPriority.Background);
         }
     }
 
@@ -465,4 +552,6 @@ public partial class PickerWindow : Window
             e.Handled = true;
         }
     }
+
+    #endregion
 }
