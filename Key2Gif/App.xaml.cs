@@ -47,17 +47,23 @@ public partial class App : Application
 
         // Create services
         var settings = Models.AppSettings.Load();
-        Log.Info($"Settings loaded from {Models.AppSettings.SettingsPath ?? "(new)"}");
 
-        var giphyKey = settings.GiphyApiKey;
-        if (string.IsNullOrEmpty(giphyKey))
+        if (string.IsNullOrEmpty(settings.GiphyApiKey))
         {
-            // GIPHY public SDK key (published in official docs/examples)
-            giphyKey = "REDACTED";
-            Log.Info("Using GIPHY public SDK key. For higher limits, add your own key to " + Models.AppSettings.SettingsPath);
+            var dialog = new Views.ApiKeyDialog();
+            dialog.ShowDialog();
+            if (string.IsNullOrEmpty(dialog.ApiKey))
+            {
+                Log.Error("No API key provided. Exiting.");
+                Shutdown();
+                return;
+            }
+            settings.GiphyApiKey = dialog.ApiKey;
+            settings.Save();
+            Log.Info("API key saved to " + Models.AppSettings.SettingsPath);
         }
 
-        _gifService = new GifService(giphyKey);
+        _gifService = new GifService(settings.GiphyApiKey);
         _recentTracker = new RecentTracker();
         Log.Info("Services initialized");
 

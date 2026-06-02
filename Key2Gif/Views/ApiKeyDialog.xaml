@@ -1,0 +1,75 @@
+<Window x:Class="Key2Gif.Views.ApiKeyDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Key2Gif — API Key Required"
+        Width="420" Height="220"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        ShowInTaskbar="True"
+        Topmost="True"
+        ResizeMode="NoResize"
+        WindowStartupLocation="CenterScreen">
+
+    <Border Background="#E6202020"
+            CornerRadius="12"
+            BorderBrush="#40FFFFFF"
+            BorderThickness="1"
+            Margin="8"
+            ClipToBounds="True">
+        <Border.Effect>
+            <DropShadowEffect BlurRadius="20" ShadowDepth="2" Opacity="0.5" Color="Black"/>
+        </Border.Effect>
+
+        <StackPanel Margin="24,20">
+            <TextBlock Text="GIPHY API Key Required" Foreground="White" FontSize="16" FontWeight="SemiBold" Margin="0,0,0,8"/>
+            <TextBlock Foreground="#B0FFFFFF" FontSize="12" TextWrapping="Wrap" Margin="0,0,0,12">
+                Get a free API key at
+                <Hyperlink NavigateUri="https://developers.giphy.com/dashboard/?create=true"
+                           Foreground="#8080FF" RequestNavigate="OnLinkClick">developers.giphy.com</Hyperlink>
+            </TextBlock>
+            <TextBox x:Name="KeyInput"
+                     Padding="10,8" FontSize="14"
+                     Background="#1AFFFFFF" Foreground="#E0FFFFFF"
+                     BorderBrush="#30FFFFFF" BorderThickness="1" CaretBrush="#B0FFFFFF">
+                <TextBox.Resources>
+                    <Style TargetType="Border">
+                        <Setter Property="CornerRadius" Value="6"/>
+                    </Style>
+                </TextBox.Resources>
+            </TextBox>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
+                <Button Content="Exit" Click="OnExit" Padding="16,6" Margin="0,0,8,0"
+                        Background="#30FFFFFF" Foreground="#B0FFFFFF" BorderThickness="0" Cursor="Hand">
+                    <Button.Template>
+                        <ControlTemplate TargetType="Button">
+                            <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="6" Padding="{TemplateBinding Padding}">
+                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <ControlTemplate.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter TargetName="Bd" Property="Background" Value="#50FFFFFF"/>
+                                </Trigger>
+                            </ControlTemplate.Triggers>
+                        </ControlTemplate>
+                    </Button.Template>
+                </Button>
+                <Button Content="Save" Click="OnSave" Padding="16,6"
+                        Background="#405050DD" Foreground="White" BorderThickness="0" Cursor="Hand">
+                    <Button.Template>
+                        <ControlTemplate TargetType="Button">
+                            <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="6" Padding="{TemplateBinding Padding}">
+                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <ControlTemplate.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter TargetName="Bd" Property="Background" Value="#607070EE"/>
+                                </Trigger>
+                            </ControlTemplate.Triggers>
+                        </ControlTemplate>
+                    </Button.Template>
+                </Button>
+            </StackPanel>
+        </StackPanel>
+    </Border>
+</Window>

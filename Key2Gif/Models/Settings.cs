@@ -6,7 +6,6 @@ using System.Text.Json;
 public class AppSettings
 {
     public string GiphyApiKey { get; set; } = "";
-    public string TenorApiKey { get; set; } = "";
     public int MaxRecentItems { get; set; } = 8;
 
     private static readonly string AppDataDir = Path.Combine(
