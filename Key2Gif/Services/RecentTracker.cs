@@ -21,7 +21,7 @@ public class RecentTracker
     public IReadOnlyList<RecentGifEntry> RecentGifs => _recentGifs;
     public event Action? Changed;
 
-    public RecentTracker(int maxItems = 50)
+    public RecentTracker(int maxItems = 8)
     {
         _maxItems = maxItems;
         var appData = Path.Combine(

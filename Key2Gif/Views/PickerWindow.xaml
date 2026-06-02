@@ -136,7 +136,7 @@
                     </StackPanel>
 
                     <!-- GIF Grid -->
-                    <WrapPanel x:Name="GifPanel" Margin="8,2"/>
+                    <WrapPanel x:Name="GifPanel" Margin="6,2,6,4"/>
 
                     <!-- Load More -->
                     <StackPanel HorizontalAlignment="Center" Margin="0,4,0,12">

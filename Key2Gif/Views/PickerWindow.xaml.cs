@@ -52,7 +52,7 @@ public partial class PickerWindow : Window
         _gifService = gifService;
         _recentTracker = recentTracker;
 
-        _searchDebounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
+        _searchDebounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(800) };
         _searchDebounce.Tick += OnSearchDebounceTick;
 
         _recentTracker.Changed += () =>
