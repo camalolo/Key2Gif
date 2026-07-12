@@ -73,7 +73,7 @@ public partial class App : Application
         Log.Info("Picker window created");
 
         // Register global hotkey
-        Log.Info("Registering global hotkey (Win+. via low-level hook)...");
+        Log.Info("Registering global hotkey (LCtrl+Shift+RCtrl via low-level hook)...");
         _hotkeyService = new HotkeyService();
         _hotkeyService.HotkeyPressed += OnHotkeyPressed;
         _hotkeyService.Register();

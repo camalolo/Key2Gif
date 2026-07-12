@@ -6,7 +6,7 @@ A lightweight Windows GIF picker that lets you search and insert animated GIFs i
 
 ## Features
 
-- **Global hotkey** — Press `Ctrl+Shift+RightCtrl` to open the picker from anywhere
+- **Global hotkey** — Press `LeftCtrl+Shift+RightCtrl` to open the picker from anywhere
 - **Search** — Type to search GIPHY's library of millions of GIFs
 - **Single click to paste** — Click any GIF to insert it directly into your active window
 - **Animated previews** — Thumbnails animate in the grid so you know what you're picking
@@ -37,7 +37,7 @@ build.bat
 
 ## Configuration
 
-The GIPHY API key is currently hardcoded. You can replace it in `Services/GifService.cs` with your own key from [developers.giphy.com](https://developers.giphy.com/).
+On first launch, Key2Gif will prompt you for a GIPHY API key. Get a free key from [developers.giphy.com](https://developers.giphy.com/). The key is stored in `%AppData%\Key2Gif\settings.json`.
 
 ## License
 

@@ -87,7 +87,7 @@ public partial class PickerWindow : Window
 
         // Force foreground so we get keyboard focus
         var hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
-        SetForegroundWindow(hwnd);
+        ForceForeground(hwnd);
 
         // Open animation
         var anim = new DoubleAnimation(0.95, 1.0, TimeSpan.FromMilliseconds(150))
@@ -204,6 +204,38 @@ public partial class PickerWindow : Window
 
     [DllImport("user32.dll")]
     private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, IntPtr lpdwProcessId);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+
+    /// <summary>
+    /// Forces a window to the foreground, working around Windows' foreground-lock
+    /// restriction that blocks background processes from stealing focus.
+    /// Essential on first activation when the HWND has never been foreground before.
+    /// </summary>
+    private void ForceForeground(IntPtr hwnd)
+    {
+        var foreground = GetForegroundWindow();
+        var foregroundThreadId = GetWindowThreadProcessId(foreground, IntPtr.Zero);
+        var currentThreadId = GetCurrentThreadId();
+
+        if (foregroundThreadId != currentThreadId)
+        {
+            AttachThreadInput(currentThreadId, foregroundThreadId, true);
+            SetForegroundWindow(hwnd);
+            AttachThreadInput(currentThreadId, foregroundThreadId, false);
+        }
+        else
+        {
+            SetForegroundWindow(hwnd);
+        }
+    }
 
     [DllImport("user32.dll")]
     private static extern bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);
