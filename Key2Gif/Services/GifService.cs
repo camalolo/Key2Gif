@@ -1,20 +1,23 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Net.Http;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using Key2Gif.Models;
 
 namespace Key2Gif.Services;
 
+/// <summary>
+/// Result of a GIPHY API query — stateless, no instance mutation.
+/// </summary>
+public record GifSearchResult(List<GifResult> Gifs, int NextOffset);
+
 public class GifService
 {
-    private readonly HttpClient _httpClient;
     private const string BaseUrl = "https://api.giphy.com/v1/gifs";
+    private readonly HttpClient _httpClient;
     private readonly string _apiKey;
-    private int _totalCount;
-    private int _offset;
 
     public GifService(string apiKey)
     {
@@ -22,72 +25,27 @@ public class GifService
         _httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
     }
 
-    public int TotalCount => _totalCount;
-    public int Offset => _offset;
-
-    public async Task<List<GifResult>> SearchAsync(string query, int limit = 20, int offset = 0)
+    public Task<GifSearchResult> SearchAsync(string query, int limit = 40, int offset = 0, CancellationToken ct = default)
     {
         var url = $"{BaseUrl}/search?api_key={_apiKey}&q={Uri.EscapeDataString(query)}&limit={limit}&offset={offset}&rating=pg-13";
-        Log.Info($"GIPHY API request: {url}");
-
-        var response = await _httpClient.GetStringAsync(url);
-        Log.Info($"GIPHY API response length: {response.Length}");
-
-        using var doc = JsonDocument.Parse(response);
-        var pagination = doc.RootElement.GetProperty("pagination");
-        _totalCount = pagination.GetProperty("total_count").GetInt32();
-        _offset = pagination.GetProperty("offset").GetInt32() + limit;
-
-        var results = new List<GifResult>();
-        foreach (var item in doc.RootElement.GetProperty("data").EnumerateArray())
-        {
-            var gif = new GifResult
-            {
-                Id = item.GetProperty("id").GetString() ?? "",
-                Title = item.GetProperty("title").GetString() ?? ""
-            };
-
-            var images = item.GetProperty("images");
-
-            // Preview: fixed_width (animated, 200px wide)
-            if (images.TryGetProperty("fixed_width", out var preview))
-            {
-                gif.PreviewUrl = preview.GetProperty("url").GetString() ?? "";
-                gif.Width = int.TryParse(preview.GetProperty("width").GetString(), out var w) ? w : 200;
-                gif.Height = int.TryParse(preview.GetProperty("height").GetString(), out var h) ? h : 150;
-            }
-
-            // Tiny: fixed_width_small (100px wide)
-            if (images.TryGetProperty("fixed_width_small", out var tiny))
-            {
-                gif.TinyUrl = tiny.GetProperty("url").GetString() ?? "";
-            }
-
-            // Full: original
-            if (images.TryGetProperty("original", out var full))
-            {
-                gif.FullUrl = full.GetProperty("url").GetString() ?? "";
-            }
-
-            results.Add(gif);
-        }
-
-        Log.Info($"GIPHY returned {results.Count} gifs (total={_totalCount}, nextOffset={_offset})");
-        return results;
+        Log.Info($"GIPHY search: q='{query}' limit={limit} offset={offset}");
+        return QueryAsync(url, limit, ct);
     }
 
-    public async Task<List<GifResult>> GetTrendingAsync(int limit = 20, int offset = 0)
+    public Task<GifSearchResult> GetTrendingAsync(int limit = 40, int offset = 0, CancellationToken ct = default)
     {
         var url = $"{BaseUrl}/trending?api_key={_apiKey}&limit={limit}&offset={offset}&rating=pg-13";
-        Log.Info($"GIPHY trending request: {url}");
+        Log.Info($"GIPHY trending: limit={limit} offset={offset}");
+        return QueryAsync(url, limit, ct);
+    }
 
-        var response = await _httpClient.GetStringAsync(url);
-        Log.Info($"GIPHY trending response length: {response.Length}");
+    private async Task<GifSearchResult> QueryAsync(string url, int limit, CancellationToken ct)
+    {
+        var response = await _httpClient.GetStringAsync(url, ct);
 
         using var doc = JsonDocument.Parse(response);
         var pagination = doc.RootElement.GetProperty("pagination");
-        _totalCount = pagination.GetProperty("total_count").GetInt32();
-        _offset = pagination.GetProperty("offset").GetInt32() + limit;
+        var nextOffset = pagination.GetProperty("offset").GetInt32() + limit;
 
         var results = new List<GifResult>();
         foreach (var item in doc.RootElement.GetProperty("data").EnumerateArray())
@@ -101,11 +59,7 @@ public class GifService
             var images = item.GetProperty("images");
 
             if (images.TryGetProperty("fixed_width", out var preview))
-            {
                 gif.PreviewUrl = preview.GetProperty("url").GetString() ?? "";
-                gif.Width = int.TryParse(preview.GetProperty("width").GetString(), out var w) ? w : 200;
-                gif.Height = int.TryParse(preview.GetProperty("height").GetString(), out var h) ? h : 150;
-            }
 
             if (images.TryGetProperty("fixed_width_small", out var tiny))
                 gif.TinyUrl = tiny.GetProperty("url").GetString() ?? "";
@@ -116,7 +70,7 @@ public class GifService
             results.Add(gif);
         }
 
-        Log.Info($"GIPHY trending returned {results.Count} gifs");
-        return results;
+        Log.Info($"GIPHY returned {results.Count} gifs (nextOffset={nextOffset})");
+        return new GifSearchResult(results, nextOffset);
     }
 }

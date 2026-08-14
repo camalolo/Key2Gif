@@ -1,5 +1,4 @@
 using System;
-using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Threading;
@@ -35,7 +34,7 @@ public class HotkeyService : IDisposable
     private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
 
     [DllImport("kernel32.dll")]
-    private static extern IntPtr GetModuleHandle(string lpModuleName);
+    private static extern IntPtr GetModuleHandle(string? lpModuleName);
 
     private IntPtr _hookId = IntPtr.Zero;
     private LowLevelKeyboardProc? _hookProc;
@@ -52,9 +51,8 @@ public class HotkeyService : IDisposable
         _dispatcher = Application.Current.Dispatcher;
 
         _hookProc = HookCallback;
-        using var process = Process.GetCurrentProcess();
-        using var module = process.MainModule!;
-        _hookId = SetWindowsHookEx(WH_KEYBOARD_LL, _hookProc, GetModuleHandle(module.ModuleName), 0);
+        // WH_KEYBOARD_LL ignores hMod; pass current module handle for safety.
+        _hookId = SetWindowsHookEx(WH_KEYBOARD_LL, _hookProc, GetModuleHandle(null), 0);
 
         if (_hookId != IntPtr.Zero)
         {
@@ -80,8 +78,9 @@ public class HotkeyService : IDisposable
             else if (vkCode == VK_LSHIFT || vkCode == VK_RSHIFT) _shiftDown = isDown;
             else if (vkCode == VK_RCONTROL)
             {
-                if (isDown && _lCtrlDown && _shiftDown)
+                if (isDown && _lCtrlDown && _shiftDown && !_rCtrlDown)
                 {
+                    _rCtrlDown = true;
                     Log.Info("LCtrl+Shift+RCtrl intercepted!");
                     _dispatcher?.BeginInvoke(() => HotkeyPressed?.Invoke());
                     return (IntPtr)1; // Consume the key

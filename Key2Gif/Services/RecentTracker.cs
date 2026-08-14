@@ -1,3 +1,4 @@
+using System;
 using System.IO;
 using System.Text.Json;
 using Key2Gif.Models;
@@ -53,22 +54,16 @@ public class RecentTracker
                 using var doc = JsonDocument.Parse(json);
                 var root = doc.RootElement;
 
-                if (root.ValueKind == JsonValueKind.Array)
+                if (root.ValueKind == JsonValueKind.Object &&
+                    root.TryGetProperty("gifs", out var gifsProp))
                 {
-                    // Legacy format: just a list of emoji strings — skip
-                    _recentGifs = [];
-                }
-                else if (root.ValueKind == JsonValueKind.Object)
-                {
-                    if (root.TryGetProperty("gifs", out var gifsProp))
-                        _recentGifs = JsonSerializer.Deserialize<List<RecentGifEntry>>(gifsProp.GetRawText()) ?? [];
-                    else
-                        _recentGifs = [];
+                    _recentGifs = JsonSerializer.Deserialize<List<RecentGifEntry>>(gifsProp.GetRawText()) ?? [];
                 }
             }
         }
-        catch
+        catch (Exception ex) when (ex is IOException or JsonException)
         {
+            Log.Error($"Failed to load recent GIFs: {ex.Message}", ex);
             _recentGifs = [];
         }
     }
@@ -81,6 +76,9 @@ public class RecentTracker
             var json = JsonSerializer.Serialize(data);
             File.WriteAllText(_filePath, json);
         }
-        catch { }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Log.Error($"Failed to save recent GIFs: {ex.Message}", ex);
+        }
     }
 }

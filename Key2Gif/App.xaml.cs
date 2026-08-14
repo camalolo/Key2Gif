@@ -26,12 +26,15 @@ public partial class App : Application
         // Global exception handlers so crashes get logged
         AppDomain.CurrentDomain.UnhandledException += (s, args) =>
         {
-            if (args.ExceptionObject is ArgumentOutOfRangeException)
+            if (args.ExceptionObject is Exception ex)
             {
-                Log.Error("Suppressed WPF Freezable crash", args.ExceptionObject as Exception);
-                return;
+                if (ex is ArgumentOutOfRangeException)
+                {
+                    Log.Error("Suppressed WPF Freezable crash", ex);
+                    return;
+                }
+                Log.Error("Unhandled exception", ex);
             }
-            Log.Error("Unhandled exception", args.ExceptionObject as Exception);
         };
         DispatcherUnhandledException += (s, args) =>
         {

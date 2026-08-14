@@ -36,6 +36,9 @@ public static class ClipboardInserter
     [DllImport("kernel32.dll")]
     private static extern bool GlobalUnlock(IntPtr hMem);
 
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GlobalFree(IntPtr hMem);
+
     private const int KEYEVENTF_KEYDOWN = 0x0000;
     private const int KEYEVENTF_KEYUP = 0x0002;
     private const byte VK_CONTROL = 0x11;
@@ -44,62 +47,38 @@ public static class ClipboardInserter
     private const uint GMEM_MOVEABLE = 0x0002;
     private const uint CF_HDROP = 15;
 
-    public static void InsertText(string text)
-    {
-        // Save current clipboard
-        string? prevText = null;
-        try { prevText = Clipboard.ContainsText() ? Clipboard.GetText() : null; } catch { }
-
-        Clipboard.SetText(text);
-
-        Thread.Sleep(50);
-        SendCtrlV();
-
-        // Restore clipboard after a delay
-        ThreadPool.QueueUserWorkItem(_ =>
-        {
-            Thread.Sleep(500);
-            try
-            {
-                if (prevText != null)
-                    Clipboard.SetText(prevText);
-            }
-            catch { }
-        });
-    }
-
     public static async Task InsertGifAsync(string url)
     {
-        Log.Info($"Downloading GIF from: {url}");
-        using var httpClient = new System.Net.Http.HttpClient();
-        var bytes = await httpClient.GetByteArrayAsync(url);
-        Log.Info($"Downloaded GIF: {bytes.Length} bytes");
+        Log.Info($"Loading GIF from cache/download: {url}");
+        var bytes = await GifCache.GetOrDownloadAsync(url);
+        var filePath = GifCache.GetFilePath(url);
+        Log.Info($"GIF ready ({bytes.Length} bytes) from cache: {filePath}");
 
-        // Save to temp file
-        var tempFile = Path.Combine(Path.GetTempPath(), $"key2gif_{Guid.NewGuid()}.gif");
-        await File.WriteAllBytesAsync(tempFile, bytes);
+        // Save current clipboard contents so we can restore after paste
+        IDataObject? prevClipboard = null;
+        try { prevClipboard = Clipboard.GetDataObject(); }
+        catch { }
 
-        // Put GIF on clipboard using native Win32 — single session, no WPF clipboard after
         try
         {
-            CopyGifToClipboardNative(bytes, tempFile);
+            CopyGifToClipboardNative(bytes, filePath);
         }
         catch (Exception ex)
         {
             Log.Error($"Native clipboard failed: {ex.Message}", ex);
-            // Last resort: WPF file drop
-            Clipboard.SetFileDropList(new System.Collections.Specialized.StringCollection { tempFile });
+            Clipboard.SetFileDropList(new System.Collections.Specialized.StringCollection { filePath });
         }
 
-        Thread.Sleep(80);
+        await Task.Delay(80);
         SendCtrlV();
 
-        // Clean up temp file after delay
-        ThreadPool.QueueUserWorkItem(_ =>
+        // Restore clipboard after the target app has had time to process the paste
+        if (prevClipboard != null)
         {
-            Thread.Sleep(5000);
-            try { File.Delete(tempFile); } catch { }
-        });
+            await Task.Delay(500);
+            try { Clipboard.SetDataObject(prevClipboard); }
+            catch { }
+        }
     }
 
     private static void CopyGifToClipboardNative(byte[] gifBytes, string tempFile)
@@ -119,9 +98,10 @@ public static class ClipboardInserter
         }
         catch { }
 
-        if (!OpenClipboard(hwnd))
+        // Retry opening clipboard — another app may hold it briefly
+        if (!TryOpenClipboard(hwnd))
         {
-            Log.Error("OpenClipboard failed");
+            Log.Error("OpenClipboard failed after retries");
             throw new InvalidOperationException("Cannot open clipboard");
         }
 
@@ -140,34 +120,40 @@ public static class ClipboardInserter
                     Marshal.Copy(gifBytes, 0, ptr, gifBytes.Length);
                     GlobalUnlock(hMem);
 
-                    var result = SetClipboardData(gifFormat, hMem);
-                    Log.Info($"SetClipboardData(GIF format={gifFormat}) = {result != IntPtr.Zero}, size={gifBytes.Length}");
+                    if (SetClipboardData(gifFormat, hMem) == IntPtr.Zero)
+                    {
+                        GlobalFree(hMem);
+                        Log.Error("SetClipboardData(GIF) failed");
+                    }
+                    else
+                        Log.Info($"SetClipboardData(GIF format={gifFormat}), size={gifBytes.Length}");
                 }
             }
 
             // 2) Also write as CF_HDROP (file drop) so apps that only accept file drops can use it
-            // Build the DROPFILES structure + file path in Unicode
-            string filePath = tempFile + "\0"; // null-terminated
+            string filePath = tempFile + "\0";
             byte[] pathBytes = System.Text.Encoding.Unicode.GetBytes(filePath);
 
-            // DROPFILES struct: 20 bytes header + file paths
             int totalSize = 20 + pathBytes.Length;
             var dropMem = GlobalAlloc(GMEM_MOVEABLE, (UIntPtr)totalSize);
             if (dropMem != IntPtr.Zero)
             {
                 var dropPtr = GlobalLock(dropMem);
-                // Write DROPFILES header
-                Marshal.WriteInt32(dropPtr, 0, 20);          // pFiles offset
-                Marshal.WriteInt32(dropPtr, 4, 0);            // pt.x
-                Marshal.WriteInt32(dropPtr, 8, 0);            // pt.y
-                Marshal.WriteInt32(dropPtr, 12, 0);           // fNC
-                Marshal.WriteInt32(dropPtr, 16, 1);           // fWide = TRUE (Unicode)
-                // Write file path after header
+                Marshal.WriteInt32(dropPtr, 0, 20);
+                Marshal.WriteInt32(dropPtr, 4, 0);
+                Marshal.WriteInt32(dropPtr, 8, 0);
+                Marshal.WriteInt32(dropPtr, 12, 0);
+                Marshal.WriteInt32(dropPtr, 16, 1);
                 Marshal.Copy(pathBytes, 0, dropPtr + 20, pathBytes.Length);
                 GlobalUnlock(dropMem);
 
-                var dropResult = SetClipboardData(CF_HDROP, dropMem);
-                Log.Info($"SetClipboardData(CF_HDROP) = {dropResult != IntPtr.Zero}");
+                if (SetClipboardData(CF_HDROP, dropMem) == IntPtr.Zero)
+                {
+                    GlobalFree(dropMem);
+                    Log.Error("SetClipboardData(CF_HDROP) failed");
+                }
+                else
+                    Log.Info("SetClipboardData(CF_HDROP) ok");
             }
 
             CloseClipboard();
@@ -178,6 +164,17 @@ public static class ClipboardInserter
             Log.Error($"CopyGifToClipboardNative error: {ex.Message}", ex);
             CloseClipboard();
         }
+    }
+
+    private static bool TryOpenClipboard(IntPtr hwnd)
+    {
+        for (int i = 0; i < 10; i++)
+        {
+            if (OpenClipboard(hwnd))
+                return true;
+            Thread.Sleep(50);
+        }
+        return false;
     }
 
     private static void SendCtrlV()

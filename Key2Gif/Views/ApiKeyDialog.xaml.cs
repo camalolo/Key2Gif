@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Windows;
 using System.Windows.Navigation;
+using Key2Gif.Services;
 
 namespace Key2Gif.Views;
 
@@ -35,6 +36,13 @@ public partial class ApiKeyDialog : Window
 
     private void OnLinkClick(object sender, RequestNavigateEventArgs e)
     {
-        Process.Start(new ProcessStartInfo(e.Uri.AbsoluteUri) { UseShellExecute = true });
+        try
+        {
+            Process.Start(new ProcessStartInfo(e.Uri.AbsoluteUri) { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            Log.Error($"Failed to open link: {ex.Message}", ex);
+        }
     }
 }

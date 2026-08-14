@@ -1,7 +1,11 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -25,6 +29,36 @@ public partial class PickerWindow : Window
     private readonly List<GifResult> _allGifs = new();
     private readonly DispatcherTimer _searchDebounce;
 
+    // Search race protection (H5)
+    private int _searchGeneration;
+    private CancellationTokenSource? _searchCts;
+
+    // Prevent TextChanged debounce when programmatically clearing search (M1)
+    private bool _suppressSearch;
+
+    // Handler stored as field so it can be unsubscribed (M9)
+    private readonly Action _onRecentChanged;
+
+    /// <summary>
+    /// Two-tier cache for GIF thumbnails:
+    /// - _staticCache: frozen first-frame BitmapImage, shared across controls.
+    /// - _byteCache: raw GIF bytes for creating animated bitmaps on hover.
+    /// </summary>
+    private static readonly ConcurrentDictionary<string, BitmapImage> _staticCache = new();
+    private static readonly ConcurrentDictionary<string, byte[]> _byteCache = new();
+    private const int MaxCachedEntries = 200;
+
+    // Reusable frozen brushes (L9)
+    private static readonly Brush _itemBackground = CreateFrozenBrush(0x18, 0xFF, 0xFF, 0xFF);
+    private static readonly Brush _itemHoverBorder = CreateFrozenBrush(0x50, 0xFF, 0xFF, 0xFF);
+
+    private static Brush CreateFrozenBrush(byte a, byte r, byte g, byte b)
+    {
+        var brush = new SolidColorBrush(Color.FromArgb(a, r, g, b));
+        brush.Freeze();
+        return brush;
+    }
+
     [DllImport("user32.dll")]
     private static extern bool GetGUIThreadInfo(uint dwThreadid, ref GUITHREADINFO lpgui);
 
@@ -39,7 +73,7 @@ public partial class PickerWindow : Window
         public IntPtr hwndMenuOwner;
         public IntPtr hwndMoveSize;
         public IntPtr hwndCaret;
-        public System.Drawing.Rectangle rcCaret;
+        public RECT rcCaret;
     }
 
     [DllImport("user32.dll")]
@@ -52,13 +86,11 @@ public partial class PickerWindow : Window
         _gifService = gifService;
         _recentTracker = recentTracker;
 
-        _searchDebounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(800) };
+        _searchDebounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
         _searchDebounce.Tick += OnSearchDebounceTick;
 
-        _recentTracker.Changed += () =>
-        {
-            Dispatcher.BeginInvoke(RefreshContent);
-        };
+        _onRecentChanged = () => Dispatcher.BeginInvoke(RefreshContent);
+        _recentTracker.Changed += _onRecentChanged;
 
         // Initial content
         RefreshContent();
@@ -69,6 +101,14 @@ public partial class PickerWindow : Window
 
     public void ShowPicker()
     {
+        // Cancel any in-flight hide animation (M4)
+        RootBorder.BeginAnimation(OpacityProperty, null);
+        RootScale.BeginAnimation(ScaleTransform.ScaleXProperty, null);
+        RootScale.BeginAnimation(ScaleTransform.ScaleYProperty, null);
+        Opacity = 1;
+        RootScale.ScaleX = 1;
+        RootScale.ScaleY = 1;
+
         // Remember which window had focus before we show ourselves
         _lastForegroundWindow = GetForegroundWindow();
         Log.Info($"Saved foreground window: 0x{_lastForegroundWindow.ToInt64():X}");
@@ -76,8 +116,10 @@ public partial class PickerWindow : Window
         // Capture mouse position BEFORE showing our window (more accurate)
         _hasMousePos = GetCursorPos(out _savedMousePos);
 
-        // Reset state
+        // Reset search without triggering debounce (M1)
+        _suppressSearch = true;
         SearchBox.Text = "";
+        _suppressSearch = false;
         UpdateSearchPlaceholder();
 
         // Show first (creates PresentationSource), then position
@@ -112,6 +154,8 @@ public partial class PickerWindow : Window
 
     public void HidePicker()
     {
+        if (!IsVisible) return;
+
         var anim = new DoubleAnimation(1.0, 0.95, TimeSpan.FromMilliseconds(100));
         var opacityAnim = new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(100));
         opacityAnim.Completed += (s, e) => Hide();
@@ -124,22 +168,25 @@ public partial class PickerWindow : Window
     {
         Point? caretScreen = null;
 
-        // Strategy 1: GetGUIThreadInfo caret position (works: Win32, Office, WPF, Notepad)
+        // Strategy 1: GetGUIThreadInfo caret position
         try
         {
             var info = new GUITHREADINFO { cbSize = Marshal.SizeOf<GUITHREADINFO>() };
             if (GetGUIThreadInfo(0, ref info) && info.hwndCaret != IntPtr.Zero)
             {
                 var cr = info.rcCaret;
-                var pt = new POINT { X = cr.Left + cr.Width / 2, Y = cr.Top + cr.Height };
+                var pt = new POINT { X = (cr.Left + cr.Right) / 2, Y = cr.Bottom };
                 ClientToScreen(info.hwndCaret, ref pt);
                 caretScreen = new Point(pt.X, pt.Y + 8);
                 Log.Info($"Caret position from GetGUIThreadInfo: ({pt.X}, {pt.Y})");
             }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            Log.Error($"GetGUIThreadInfo caret failed: {ex.Message}", ex);
+        }
 
-        // Strategy 2: GetGUIThreadInfo focused element position (works: some apps without caret)
+        // Strategy 2: GetGUIThreadInfo focused element position
         if (caretScreen == null)
         {
             try
@@ -148,14 +195,16 @@ public partial class PickerWindow : Window
                 if (GetGUIThreadInfo(0, ref info) && info.hwndFocus != IntPtr.Zero)
                 {
                     GetWindowRect(info.hwndFocus, out var focusRect);
-                    // Position at bottom-center of focused control
                     caretScreen = new Point(
                         (focusRect.Left + focusRect.Right) / 2.0,
                         focusRect.Bottom + 4);
                     Log.Info($"Focus rect position: ({focusRect.Left},{focusRect.Top})-({focusRect.Right},{focusRect.Bottom})");
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                Log.Error($"GetGUIThreadInfo focus failed: {ex.Message}", ex);
+            }
         }
 
         // Strategy 3: Saved mouse position from before window was shown
@@ -217,7 +266,6 @@ public partial class PickerWindow : Window
     /// <summary>
     /// Forces a window to the foreground, working around Windows' foreground-lock
     /// restriction that blocks background processes from stealing focus.
-    /// Essential on first activation when the HWND has never been foreground before.
     /// </summary>
     private void ForceForeground(IntPtr hwnd)
     {
@@ -266,7 +314,6 @@ public partial class PickerWindow : Window
         var query = SearchBox.Text.Trim();
         UpdateSearchPlaceholder();
 
-        // Update separator label
         GifSeparatorLabel.Text = string.IsNullOrEmpty(query) ? "Trending GIFs" : "Search Results";
 
         // --- Recent GIFs section ---
@@ -283,10 +330,8 @@ public partial class PickerWindow : Window
         // --- GIFs ---
         if (string.IsNullOrEmpty(query))
         {
-            // Show trending GIFs
             LoadTrendingGifs();
         }
-        // else: GIF search is triggered via debounce in OnSearchDebounceTick
     }
 
     private void BuildRecentGifPanel()
@@ -298,8 +343,16 @@ public partial class PickerWindow : Window
         }
     }
 
-    private void CleanupGifPanel(WrapPanel panel)
+    private void CleanupGifPanel(Panel panel)
     {
+        foreach (var child in panel.Children.OfType<Border>())
+        {
+            if (child.Child is Image img)
+            {
+                WpfAnimatedGif.ImageBehavior.SetAnimatedSource(img, null);
+                img.Source = null;
+            }
+        }
         panel.Children.Clear();
     }
 
@@ -310,7 +363,8 @@ public partial class PickerWindow : Window
             Width = 100,
             Height = 75,
             Margin = new Thickness(3),
-            Background = new SolidColorBrush(Color.FromArgb(0x18, 0xFF, 0xFF, 0xFF)),
+            Background = _itemBackground,
+            BorderBrush = Brushes.Transparent,
             CornerRadius = new CornerRadius(4),
             ClipToBounds = true,
             Cursor = Cursors.Hand,
@@ -323,27 +377,113 @@ public partial class PickerWindow : Window
         };
         RenderOptions.SetBitmapScalingMode(img, BitmapScalingMode.HighQuality);
 
-        var url = !string.IsNullOrEmpty(tinyUrl) ? tinyUrl : previewUrl;
-
-        try
-        {
-            var bitmap = new BitmapImage();
-            bitmap.BeginInit();
-            bitmap.UriSource = new Uri(url);
-            bitmap.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
-            bitmap.EndInit();
-            WpfAnimatedGif.ImageBehavior.SetAnimatedSource(img, bitmap);
-            WpfAnimatedGif.ImageBehavior.SetAutoStart(img, true);
-        }
-        catch { }
-
         outerBorder.Child = img;
 
-        // Hover effect
-        outerBorder.MouseEnter += (s, e) => outerBorder.BorderBrush = new SolidColorBrush(Color.FromArgb(0x50, 0xFF, 0xFF, 0xFF));
+        // Hover border effect
+        outerBorder.MouseEnter += (s, e) => outerBorder.BorderBrush = _itemHoverBorder;
         outerBorder.MouseLeave += (s, e) => outerBorder.BorderBrush = Brushes.Transparent;
 
+        var url = !string.IsNullOrEmpty(tinyUrl) ? tinyUrl : previewUrl;
+
+        // Static first-frame display + lazy animation on hover
+        _ = LoadThumbnailAsync(img, url, outerBorder);
+
         return outerBorder;
+    }
+
+    /// <summary>
+    /// Loads a static frozen first-frame for display. Creates a per-control
+    /// animated BitmapImage only on hover, so at most one GIF animates at a time.
+    /// </summary>
+    private static async Task LoadThumbnailAsync(
+        Image img, string url, Border container)
+    {
+        try
+        {
+            // Ensure bytes are cached
+            if (!_byteCache.TryGetValue(url, out var bytes))
+            {
+                bytes = await GifCache.GetOrDownloadAsync(url);
+                _byteCache.TryAdd(url, bytes);
+                if (_byteCache.Count > MaxCachedEntries)
+                    _byteCache.Clear();
+            }
+
+            // Get or create frozen static thumbnail (shared, safe across controls)
+            if (!_staticCache.TryGetValue(url, out var staticBitmap))
+            {
+                staticBitmap = await Task.Run(() =>
+                {
+                    using var ms = new MemoryStream(bytes);
+                    var b = new BitmapImage();
+                    b.BeginInit();
+                    b.CacheOption = BitmapCacheOption.OnLoad;
+                    b.StreamSource = ms;
+                    b.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
+                    b.EndInit();
+                    b.Freeze();
+                    return b;
+                });
+
+                _staticCache.TryAdd(url, staticBitmap);
+                if (_staticCache.Count > MaxCachedEntries)
+                    _staticCache.Clear();
+            }
+
+            if (container.Parent == null) return;
+
+            // Show static first frame (no animation timers)
+            img.Source = staticBitmap;
+
+            // Animate on hover only — fresh BitmapImage per hover to avoid
+            // WpfAnimatedGif stream-sharing corruption
+            container.MouseEnter += (s, e) =>
+            {
+                if (!_byteCache.TryGetValue(url, out var hovBytes)) return;
+                var animBitmap = CreateAnimatedBitmap(hovBytes);
+                if (animBitmap != null)
+                {
+                    WpfAnimatedGif.ImageBehavior.SetAutoStart(img, true);
+                    WpfAnimatedGif.ImageBehavior.SetAnimatedSource(img, animBitmap);
+                }
+            };
+
+            container.MouseLeave += (s, e) =>
+            {
+                WpfAnimatedGif.ImageBehavior.SetAnimatedSource(img, null);
+                img.Source = staticBitmap;
+            };
+        }
+        catch (Exception ex)
+        {
+            Log.Error($"Failed to load GIF preview from {url}: {ex.Message}", ex);
+        }
+    }
+
+    /// <summary>
+    /// Creates a per-control BitmapImage from GIF bytes for WpfAnimatedGif.
+    /// The MemoryStream must stay alive (not disposed) because WpfAnimatedGif
+    /// reads it at runtime for frame metadata.
+    /// </summary>
+    private static BitmapImage? CreateAnimatedBitmap(byte[] bytes)
+    {
+        try
+        {
+            var ms = new MemoryStream(bytes);
+            var b = new BitmapImage();
+            b.BeginInit();
+            b.CacheOption = BitmapCacheOption.OnLoad;
+            b.StreamSource = ms;
+            b.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
+            b.EndInit();
+            b.Freeze();
+            return b;
+        }
+        catch (Exception ex)
+        {
+            Log.Error($"Failed to create animated bitmap: {ex.Message}", ex);
+            return null;
+        }
     }
 
     #endregion
@@ -352,16 +492,15 @@ public partial class PickerWindow : Window
 
     private void OnSearchTextChanged(object sender, TextChangedEventArgs e)
     {
+        if (_suppressSearch) return;
+
         UpdateSearchPlaceholder();
         _searchDebounce.Stop();
         _searchDebounce.Start();
 
         var query = SearchBox.Text.Trim();
-
-        // Update separator label immediately
         GifSeparatorLabel.Text = string.IsNullOrEmpty(query) ? "Trending GIFs" : "Search Results";
 
-        // Hide recent GIFs section while searching
         if (!string.IsNullOrEmpty(query))
         {
             RecentGifSection.Visibility = Visibility.Collapsed;
@@ -386,13 +525,17 @@ public partial class PickerWindow : Window
         }
         else
         {
-            // Trigger GIF search for the query
             SearchGifs(query);
         }
     }
 
     private async void SearchGifs(string query)
     {
+        _searchCts?.Cancel();
+        _searchCts = new CancellationTokenSource();
+        var ct = _searchCts.Token;
+        var gen = ++_searchGeneration;
+
         try
         {
             Log.Info($"Searching GIFs: '{query}'");
@@ -402,17 +545,15 @@ public partial class PickerWindow : Window
             _gifOffset = 0;
             _lastGifQuery = query;
 
-            List<GifResult> results;
-            if (string.IsNullOrWhiteSpace(query))
-                results = await _gifService.GetTrendingAsync();
-            else
-                results = await _gifService.SearchAsync(query);
+            var result = await _gifService.SearchAsync(query, ct: ct);
+            if (gen != _searchGeneration || ct.IsCancellationRequested) return;
 
-            Log.Info($"GIF search returned {results.Count} results");
-            _gifOffset = _gifService.Offset;
-            _allGifs.AddRange(results);
+            Log.Info($"GIF search returned {result.Gifs.Count} results");
+            _gifOffset = result.NextOffset;
+            _allGifs.AddRange(result.Gifs);
             RefreshGifPanel();
         }
+        catch (OperationCanceledException) { /* stale search */ }
         catch (Exception ex)
         {
             Log.Error($"GIF search failed: {ex.Message}", ex);
@@ -427,9 +568,14 @@ public partial class PickerWindow : Window
 
     private async void LoadTrendingGifs()
     {
-        // Don't reload if we already have trending GIFs loaded and no query
+        // Don't reload if we already have trending GIFs loaded
         if (_allGifs.Count > 0 && string.IsNullOrEmpty(_lastGifQuery))
             return;
+
+        _searchCts?.Cancel();
+        _searchCts = new CancellationTokenSource();
+        var ct = _searchCts.Token;
+        var gen = ++_searchGeneration;
 
         try
         {
@@ -439,11 +585,14 @@ public partial class PickerWindow : Window
             _gifOffset = 0;
             _lastGifQuery = "";
 
-            var results = await _gifService.GetTrendingAsync();
-            _gifOffset = _gifService.Offset;
-            _allGifs.AddRange(results);
+            var result = await _gifService.GetTrendingAsync(ct: ct);
+            if (gen != _searchGeneration || ct.IsCancellationRequested) return;
+
+            _gifOffset = result.NextOffset;
+            _allGifs.AddRange(result.Gifs);
             RefreshGifPanel();
         }
+        catch (OperationCanceledException) { }
         catch (Exception ex)
         {
             Log.Error($"Trending GIFs failed: {ex.Message}", ex);
@@ -469,13 +618,23 @@ public partial class PickerWindow : Window
             LoadingText.Visibility = Visibility.Collapsed;
     }
 
+    /// <summary>
+    /// Appends new GIF elements without rebuilding existing ones (H2).
+    /// </summary>
+    private void AppendGifElements(IEnumerable<GifResult> newGifs)
+    {
+        foreach (var gif in newGifs)
+        {
+            GifPanel.Children.Add(CreateGifElement(gif.PreviewUrl, gif.TinyUrl, gif));
+        }
+    }
+
     #endregion
 
     #region Click Handling (Single Click to Paste)
 
     private void OnContentClick(object sender, MouseButtonEventArgs e)
     {
-        // Walk up the visual tree from the original source to find tagged elements
         var depObj = e.OriginalSource as DependencyObject;
         while (depObj != null)
         {
@@ -483,14 +642,21 @@ public partial class PickerWindow : Window
             {
                 if (fe.Tag is GifResult gifResult)
                 {
-                    InsertGif(gifResult);
+                    PasteGif(gifResult.FullUrl, gifResult.PreviewUrl, gifResult.Title,
+                        new RecentGifEntry
+                        {
+                            PreviewUrl = gifResult.PreviewUrl,
+                            TinyUrl = gifResult.TinyUrl,
+                            FullUrl = gifResult.FullUrl,
+                            Title = gifResult.Title
+                        });
                     e.Handled = true;
                     return;
                 }
 
                 if (fe.Tag is RecentGifEntry recentGif)
                 {
-                    InsertRecentGif(recentGif);
+                    PasteGif(recentGif.FullUrl, recentGif.PreviewUrl, recentGif.Title, recentGif);
                     e.Handled = true;
                     return;
                 }
@@ -504,58 +670,28 @@ public partial class PickerWindow : Window
 
     #region Insertion
 
-    private void InsertGif(GifResult gif)
+    private void PasteGif(string fullUrl, string previewUrl, string title, RecentGifEntry recentEntry)
     {
-        // Track in recent GIFs
-        _recentTracker.AddGif(new RecentGifEntry
-        {
-            PreviewUrl = gif.PreviewUrl,
-            TinyUrl = gif.TinyUrl,
-            FullUrl = gif.FullUrl,
-            Title = gif.Title
-        });
+        _recentTracker.AddGif(recentEntry);
 
         var targetWindow = _lastForegroundWindow;
+        var url = !string.IsNullOrEmpty(fullUrl) ? fullUrl : previewUrl;
         HidePicker();
+
         Dispatcher.BeginInvoke(async () =>
         {
             try
             {
-                await System.Threading.Tasks.Task.Delay(200);
+                await Task.Delay(200);
                 SetForegroundWindow(targetWindow);
-                await System.Threading.Tasks.Task.Delay(100);
-                var url = !string.IsNullOrEmpty(gif.FullUrl) ? gif.FullUrl : gif.PreviewUrl;
+                await Task.Delay(100);
                 await ClipboardInserter.InsertGifAsync(url);
             }
             catch (Exception ex)
             {
                 Log.Error($"GIF insert failed: {ex.Message}", ex);
             }
-        }, DispatcherPriority.Background);
-    }
-
-    private void InsertRecentGif(RecentGifEntry recentGif)
-    {
-        // Re-add to move to top of recent list
-        _recentTracker.AddGif(recentGif);
-
-        var targetWindow = _lastForegroundWindow;
-        HidePicker();
-        Dispatcher.BeginInvoke(async () =>
-        {
-            try
-            {
-                await System.Threading.Tasks.Task.Delay(200);
-                SetForegroundWindow(targetWindow);
-                await System.Threading.Tasks.Task.Delay(100);
-                var url = !string.IsNullOrEmpty(recentGif.FullUrl) ? recentGif.FullUrl : recentGif.PreviewUrl;
-                await ClipboardInserter.InsertGifAsync(url);
-            }
-            catch (Exception ex)
-            {
-                Log.Error($"Recent GIF insert failed: {ex.Message}", ex);
-            }
-        }, DispatcherPriority.Background);
+        }, DispatcherPriority.Normal);
     }
 
     #endregion
@@ -567,15 +703,16 @@ public partial class PickerWindow : Window
         try
         {
             BtnLoadMore.IsEnabled = false;
-            List<GifResult> results;
-            if (string.IsNullOrWhiteSpace(_lastGifQuery))
-                results = await _gifService.GetTrendingAsync(20, _gifOffset);
-            else
-                results = await _gifService.SearchAsync(_lastGifQuery, 20, _gifOffset);
 
-            _gifOffset = _gifService.Offset;
-            _allGifs.AddRange(results);
-            RefreshGifPanel();
+            GifSearchResult result;
+            if (string.IsNullOrWhiteSpace(_lastGifQuery))
+                result = await _gifService.GetTrendingAsync(40, _gifOffset);
+            else
+                result = await _gifService.SearchAsync(_lastGifQuery, 40, _gifOffset);
+
+            _gifOffset = result.NextOffset;
+            _allGifs.AddRange(result.Gifs);
+            AppendGifElements(result.Gifs); // append-only, no full rebuild (H2)
         }
         catch (Exception ex)
         {
@@ -600,7 +737,6 @@ public partial class PickerWindow : Window
         }
         else if (e.Key == Key.Enter)
         {
-            // Enter triggers immediate GIF search
             _searchDebounce.Stop();
             var query = SearchBox.Text.Trim();
             if (!string.IsNullOrEmpty(query))
@@ -617,7 +753,7 @@ public partial class PickerWindow : Window
     protected override void OnKeyDown(KeyEventArgs e)
     {
         base.OnKeyDown(e);
-        if (e.Key == Key.Escape)
+        if (!e.Handled && e.Key == Key.Escape)
         {
             HidePicker();
             e.Handled = true;

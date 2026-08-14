@@ -2,11 +2,11 @@ namespace Key2Gif.Models;
 
 using System.IO;
 using System.Text.Json;
+using Key2Gif.Services;
 
 public class AppSettings
 {
     public string GiphyApiKey { get; set; } = "";
-    public int MaxRecentItems { get; set; } = 8;
 
     private static readonly string AppDataDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Key2Gif");
@@ -22,7 +22,10 @@ public class AppSettings
                 return JsonSerializer.Deserialize<AppSettings>(json) ?? new AppSettings();
             }
         }
-        catch { }
+        catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException)
+        {
+            Log.Error($"Failed to load settings: {ex.Message}", ex);
+        }
 
         var settings = new AppSettings();
         settings.Save();
@@ -37,6 +40,9 @@ public class AppSettings
             var json = JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true });
             File.WriteAllText(SettingsPath, json);
         }
-        catch { }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Log.Error($"Failed to save settings: {ex.Message}", ex);
+        }
     }
 }
