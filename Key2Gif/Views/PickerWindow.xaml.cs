@@ -430,9 +430,9 @@ public partial class PickerWindow : Window
                     _staticCache.Clear();
             }
 
-            if (container.Parent == null) return;
-
-            // Show static first frame (no animation timers)
+            // Show static first frame (no animation timers).
+            // Don't check container.Parent — when caches are warm this runs
+            // synchronously before the caller adds the element to the panel.
             img.Source = staticBitmap;
 
             // Animate on hover only — fresh BitmapImage per hover to avoid
