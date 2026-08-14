@@ -378,6 +378,7 @@ public partial class PickerWindow : Window
         RenderOptions.SetBitmapScalingMode(img, BitmapScalingMode.HighQuality);
 
         outerBorder.Child = img;
+        outerBorder.ToolTip = "Click to drop file  |  Right-click to paste image";
 
         // Hover border effect
         outerBorder.MouseEnter += (s, e) => outerBorder.BorderBrush = _itemHoverBorder;
@@ -631,51 +632,72 @@ public partial class PickerWindow : Window
 
     #endregion
 
-    #region Click Handling (Single Click to Paste)
+    #region Click Handling
 
     private void OnContentClick(object sender, MouseButtonEventArgs e)
     {
-        var depObj = e.OriginalSource as DependencyObject;
+        if (TryGetGifFromTree(e.OriginalSource, out var url, out var entry))
+        {
+            PasteGif(url, entry, useDragDrop: true);
+            e.Handled = true;
+        }
+    }
+
+    private void OnContentRightClick(object sender, MouseButtonEventArgs e)
+    {
+        if (TryGetGifFromTree(e.OriginalSource, out var url, out var entry))
+        {
+            PasteGif(url, entry, useDragDrop: false);
+            e.Handled = true;
+        }
+    }
+
+    private bool TryGetGifFromTree(object source, out string url, out RecentGifEntry entry)
+    {
+        url = "";
+        entry = null!;
+
+        var depObj = source as DependencyObject;
         while (depObj != null)
         {
             if (depObj is FrameworkElement fe)
             {
                 if (fe.Tag is GifResult gifResult)
                 {
-                    PasteGif(gifResult.FullUrl, gifResult.PreviewUrl, gifResult.Title,
-                        new RecentGifEntry
-                        {
-                            PreviewUrl = gifResult.PreviewUrl,
-                            TinyUrl = gifResult.TinyUrl,
-                            FullUrl = gifResult.FullUrl,
-                            Title = gifResult.Title
-                        });
-                    e.Handled = true;
-                    return;
+                    url = !string.IsNullOrEmpty(gifResult.FullUrl) ? gifResult.FullUrl : gifResult.PreviewUrl;
+                    entry = new RecentGifEntry
+                    {
+                        PreviewUrl = gifResult.PreviewUrl,
+                        TinyUrl = gifResult.TinyUrl,
+                        FullUrl = gifResult.FullUrl,
+                        Title = gifResult.Title
+                    };
+                    return true;
                 }
 
                 if (fe.Tag is RecentGifEntry recentGif)
                 {
-                    PasteGif(recentGif.FullUrl, recentGif.PreviewUrl, recentGif.Title, recentGif);
-                    e.Handled = true;
-                    return;
+                    url = !string.IsNullOrEmpty(recentGif.FullUrl) ? recentGif.FullUrl : recentGif.PreviewUrl;
+                    entry = recentGif;
+                    return true;
                 }
             }
 
             depObj = VisualTreeHelper.GetParent(depObj);
         }
+
+        return false;
     }
 
     #endregion
 
     #region Insertion
 
-    private void PasteGif(string fullUrl, string previewUrl, string title, RecentGifEntry recentEntry)
+    private void PasteGif(string url, RecentGifEntry recentEntry, bool useDragDrop)
     {
         _recentTracker.AddGif(recentEntry);
 
         var targetWindow = _lastForegroundWindow;
-        var url = !string.IsNullOrEmpty(fullUrl) ? fullUrl : previewUrl;
         HidePicker();
 
         Dispatcher.BeginInvoke(async () =>
@@ -685,7 +707,11 @@ public partial class PickerWindow : Window
                 await Task.Delay(200);
                 SetForegroundWindow(targetWindow);
                 await Task.Delay(100);
-                await ClipboardInserter.InsertGifAsync(url);
+
+                if (useDragDrop)
+                    await ClipboardInserter.InsertFileAsync(url);
+                else
+                    await ClipboardInserter.InsertGifAsync(url);
             }
             catch (Exception ex)
             {

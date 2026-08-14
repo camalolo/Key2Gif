@@ -119,7 +119,8 @@
             <!-- Content Area -->
             <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto"
                           HorizontalScrollBarVisibility="Disabled"
-                          PreviewMouseLeftButtonUp="OnContentClick">
+                          PreviewMouseLeftButtonUp="OnContentClick"
+                          PreviewMouseRightButtonUp="OnContentRightClick">
                 <StackPanel>
                     <!-- Recent GIFs section -->
                     <StackPanel x:Name="RecentGifSection" Visibility="Collapsed">
