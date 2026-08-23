@@ -60,23 +60,6 @@ public partial class PickerWindow : Window
     }
 
     [DllImport("user32.dll")]
-    private static extern bool GetGUIThreadInfo(uint dwThreadid, ref GUITHREADINFO lpgui);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct GUITHREADINFO
-    {
-        public int cbSize;
-        public uint flags;
-        public IntPtr hwndActive;
-        public IntPtr hwndFocus;
-        public IntPtr hwndCapture;
-        public IntPtr hwndMenuOwner;
-        public IntPtr hwndMoveSize;
-        public IntPtr hwndCaret;
-        public RECT rcCaret;
-    }
-
-    [DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();
 
     public PickerWindow(GifService gifService, RecentTracker recentTracker)
@@ -95,9 +78,6 @@ public partial class PickerWindow : Window
         // Initial content
         RefreshContent();
     }
-
-    private POINT _savedMousePos;
-    private bool _hasMousePos;
 
     /// <summary>
     /// True from ShowPicker() until hiding starts. More reliable than IsVisible,
@@ -131,18 +111,14 @@ public partial class PickerWindow : Window
         _lastForegroundWindow = GetForegroundWindow();
         Log.Info($"Saved foreground window: 0x{_lastForegroundWindow.ToInt64():X}");
 
-        // Capture mouse position BEFORE showing our window (more accurate)
-        _hasMousePos = GetCursorPos(out _savedMousePos);
-
         // Reset search without triggering debounce (M1)
         _suppressSearch = true;
         SearchBox.Text = "";
         _suppressSearch = false;
         UpdateSearchPlaceholder();
 
-        // Position BEFORE Show: avoids one frame at the stale location, and
-        // GetGUIThreadInfo(0) still reads the target app (we're not foreground yet)
-        PositionNearCaret();
+        // Position BEFORE Show: avoids one frame at the stale location
+        PositionBottomRight();
 
         Show();
         Activate();
@@ -187,94 +163,16 @@ public partial class PickerWindow : Window
         RootScale.BeginAnimation(ScaleTransform.ScaleYProperty, anim);
     }
 
-    private void PositionNearCaret()
+    /// <summary>
+    /// Fixed placement: bottom-right corner of the work area (above the taskbar).
+    /// Deterministic — same spot every time, independent of caret/focus state.
+    /// </summary>
+    private void PositionBottomRight()
     {
-        Point? caretScreen = null;
-
-        // Strategy 1: GetGUIThreadInfo caret position
-        try
-        {
-            var info = new GUITHREADINFO { cbSize = Marshal.SizeOf<GUITHREADINFO>() };
-            if (GetGUIThreadInfo(0, ref info) && info.hwndCaret != IntPtr.Zero)
-            {
-                var cr = info.rcCaret;
-                var pt = new POINT { X = (cr.Left + cr.Right) / 2, Y = cr.Bottom };
-                ClientToScreen(info.hwndCaret, ref pt);
-                caretScreen = new Point(pt.X, pt.Y + 8);
-                Log.Info($"Caret position from GetGUIThreadInfo: ({pt.X}, {pt.Y})");
-            }
-        }
-        catch (Exception ex)
-        {
-            Log.Error($"GetGUIThreadInfo caret failed: {ex.Message}", ex);
-        }
-
-        // Strategy 2: GetGUIThreadInfo focused element position
-        if (caretScreen == null)
-        {
-            try
-            {
-                var info = new GUITHREADINFO { cbSize = Marshal.SizeOf<GUITHREADINFO>() };
-                if (GetGUIThreadInfo(0, ref info) && info.hwndFocus != IntPtr.Zero)
-                {
-                    GetWindowRect(info.hwndFocus, out var focusRect);
-                    // Center horizontally under the focus window (same semantics
-                    // as Strategy 4; anchoring the left edge at center-X made the
-                    // picker hang right-of-center and look misplaced)
-                    caretScreen = new Point(
-                        (focusRect.Left + focusRect.Right) / 2.0 - Width / 2,
-                        focusRect.Bottom + 4);
-                    Log.Info($"Focus rect position: ({focusRect.Left},{focusRect.Top})-({focusRect.Right},{focusRect.Bottom})");
-                }
-            }
-            catch (Exception ex)
-            {
-                Log.Error($"GetGUIThreadInfo focus failed: {ex.Message}", ex);
-            }
-        }
-
-        // Strategy 3: Saved mouse position from before window was shown
-        if (caretScreen == null && _hasMousePos)
-        {
-            caretScreen = new Point(_savedMousePos.X, _savedMousePos.Y + 16);
-            Log.Info($"Using saved mouse position: ({_savedMousePos.X}, {_savedMousePos.Y})");
-        }
-
-        // Strategy 4: Center of foreground window
-        if (caretScreen == null && _lastForegroundWindow != IntPtr.Zero)
-        {
-            GetWindowRect(_lastForegroundWindow, out var fgRect);
-            caretScreen = new Point(
-                (fgRect.Left + fgRect.Right) / 2.0 - Width / 2,
-                (fgRect.Top + fgRect.Bottom) / 2.0 - Height / 2);
-            Log.Info($"Using foreground window center");
-        }
-
-        // Strategy 5: Screen center
-        if (caretScreen == null)
-        {
-            var wa = SystemParameters.WorkArea;
-            caretScreen = new Point(
-                (wa.Left + wa.Right) / 2.0 - Width / 2,
-                (wa.Top + wa.Bottom) / 2.0 - Height / 2);
-        }
-
-        // Clamp to screen work area
-        var screen = SystemParameters.WorkArea;
-        double x = caretScreen.Value.X;
-        double y = caretScreen.Value.Y;
-
-        if (x + Width > screen.Right) x = screen.Right - Width;
-        if (x < screen.Left) x = screen.Left;
-
-        // If picker would go below screen, try placing it above the anchor instead
-        if (y + Height > screen.Bottom)
-            y = caretScreen.Value.Y - Height - 16;
-        if (y + Height > screen.Bottom) y = screen.Bottom - Height;
-        if (y < screen.Top) y = screen.Top;
-
-        Left = x;
-        Top = y;
+        const double margin = 12;
+        var wa = SystemParameters.WorkArea;
+        Left = wa.Right - Width - margin;
+        Top = wa.Bottom - Height - margin;
     }
 
     [DllImport("user32.dll")]
@@ -309,28 +207,6 @@ public partial class PickerWindow : Window
         {
             SetForegroundWindow(hwnd);
         }
-    }
-
-    [DllImport("user32.dll")]
-    private static extern bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);
-
-    [DllImport("user32.dll")]
-    private static extern bool GetCursorPos(out POINT lpPoint);
-
-    [DllImport("user32.dll")]
-    private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct RECT
-    {
-        public int Left, Top, Right, Bottom;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct POINT
-    {
-        public int X;
-        public int Y;
     }
 
     #region Content Refresh
