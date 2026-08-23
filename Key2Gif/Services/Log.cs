@@ -31,10 +31,41 @@ public static class Log
 
     public static void Warning(string message) => Write("WARN", message);
 
+    // --- Repeat collapsing ---
+    // Exception storms (e.g. the known WPF FrugalObjectList crash firing 200+/sec
+    // during hover) each cost a full stack-trace format + queue entry. Identical
+    // messages within the window are collapsed into a single "repeated Nx" line.
+    private static readonly object _rateGate = new();
+    private static string _lastKey = "";
+    private static long _lastKeyAt;
+    private static int _suppressed;
+    private const long CollapseWindowMs = 1000;
+    private const int KeyLength = 160;
+
     private static void Write(string level, string message)
     {
-        var line = $"[{DateTime.Now:HH:mm:ss.fff}] [{level}] {message}\n";
-        _queue.Add(line);
+        var now = Environment.TickCount64;
+        var key = level + '|' + (message.Length <= KeyLength ? message : message[..KeyLength]);
+
+        lock (_rateGate)
+        {
+            if (key == _lastKey && now - _lastKeyAt < CollapseWindowMs)
+            {
+                _suppressed++;
+                _lastKeyAt = now;
+                return;
+            }
+
+            if (_suppressed > 0)
+            {
+                _queue.Add($"[{DateTime.Now:HH:mm:ss.fff}] [{level}] (previous message repeated {_suppressed}x, collapsed)\n");
+                _suppressed = 0;
+            }
+
+            _lastKey = key;
+            _lastKeyAt = now;
+            _queue.Add($"[{DateTime.Now:HH:mm:ss.fff}] [{level}] {message}\n");
+        }
     }
 
     private static void WriterLoop()

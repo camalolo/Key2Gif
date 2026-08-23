@@ -40,11 +40,20 @@ public class HotkeyService : IDisposable
     private LowLevelKeyboardProc? _hookProc;
     private Dispatcher? _dispatcher;
 
-    private bool _lCtrlDown;
-    private bool _shiftDown;
+    // Only RCtrl itself is tracked, solely to suppress auto-repeat.
+    // A keydown arriving long after the previous RCtrl event is always a fresh
+    // physical press (auto-repeat fires every ~30ms), so a dropped keyup can
+    // never wedge the hotkey for more than one press.
     private bool _rCtrlDown;
+    private long _lastRCtrlEvent;
+    private const long RepeatTimeoutMs = 500;
 
     public event Action? HotkeyPressed;
+
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int vKey);
+
+    private static bool IsDown(int vk) => (GetAsyncKeyState(vk) & 0x8000) != 0;
 
     public void Register()
     {
@@ -73,19 +82,30 @@ public class HotkeyService : IDisposable
             bool isDown = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
             bool isUp = msg == WM_KEYUP || msg == WM_SYSKEYUP;
 
-            // Track modifier states
-            if (vkCode == VK_LCONTROL) _lCtrlDown = isDown;
-            else if (vkCode == VK_LSHIFT || vkCode == VK_RSHIFT) _shiftDown = isDown;
-            else if (vkCode == VK_RCONTROL)
+            // Track modifier states via live key state — immune to stuck state
+            // caused by keyup events the hook never saw (focus switches, timeouts).
+            // Only RCtrl is edge-detected; LCtrl/Shift are sampled at press time.
+            if (vkCode == VK_RCONTROL)
             {
-                if (isDown && _lCtrlDown && _shiftDown && !_rCtrlDown)
+                var now = Environment.TickCount64;
+                bool isFresh = now - _lastRCtrlEvent > RepeatTimeoutMs;
+                _lastRCtrlEvent = now;
+
+                if (isDown && (isFresh || !_rCtrlDown))
                 {
                     _rCtrlDown = true;
-                    Log.Info("LCtrl+Shift+RCtrl intercepted!");
-                    _dispatcher?.BeginInvoke(() => HotkeyPressed?.Invoke());
-                    return (IntPtr)1; // Consume the key
+
+                    if (IsDown(VK_LCONTROL) && (IsDown(VK_LSHIFT) || IsDown(VK_RSHIFT)))
+                    {
+                        Log.Info("LCtrl+Shift+RCtrl intercepted!");
+                        _dispatcher?.BeginInvoke(() => HotkeyPressed?.Invoke());
+                        return (IntPtr)1; // Consume the key
+                    }
                 }
-                _rCtrlDown = isDown;
+                else if (isUp)
+                {
+                    _rCtrlDown = false;
+                }
             }
         }
 

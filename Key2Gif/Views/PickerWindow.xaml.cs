@@ -40,12 +40,12 @@ public partial class PickerWindow : Window
     private readonly Action _onRecentChanged;
 
     /// <summary>
-    /// Two-tier cache for GIF thumbnails:
-    /// - _staticCache: frozen first-frame BitmapImage, shared across controls.
-    /// - _byteCache: raw GIF bytes for creating animated bitmaps on hover.
+    /// Frozen first-frame thumbnails (native memory, shared across controls).
+    /// Raw GIF bytes are NOT cached in RAM — GifCache's disk store is the single
+    /// source (holding byte[] payloads in a dict put 60+MB on the LOH and forced
+    /// Gen2 GCs during scrolling).
     /// </summary>
     private static readonly ConcurrentDictionary<string, BitmapImage> _staticCache = new();
-    private static readonly ConcurrentDictionary<string, byte[]> _byteCache = new();
     private const int MaxCachedEntries = 200;
 
     // Reusable frozen brushes (L9)
@@ -99,8 +99,22 @@ public partial class PickerWindow : Window
     private POINT _savedMousePos;
     private bool _hasMousePos;
 
+    /// <summary>
+    /// True from ShowPicker() until hiding starts. More reliable than IsVisible,
+    /// which stays true during the 100ms hide fade (toggle race).
+    /// </summary>
+    public bool IsOpen { get; private set; }
+
+    // Windows' activation settling can emit a transient Deactivated right after
+    // Show/ForceForeground (especially on first show) — ignore those.
+    private long _shownAt;
+    private const long DeactivationGraceMs = 400;
+
     public void ShowPicker()
     {
+        IsOpen = true;
+        _shownAt = Environment.TickCount64;
+
         // Cancel any in-flight hide animation (M4)
         RootBorder.BeginAnimation(OpacityProperty, null);
         RootScale.BeginAnimation(ScaleTransform.ScaleXProperty, null);
@@ -122,10 +136,12 @@ public partial class PickerWindow : Window
         _suppressSearch = false;
         UpdateSearchPlaceholder();
 
-        // Show first (creates PresentationSource), then position
+        // Position BEFORE Show: avoids one frame at the stale location, and
+        // GetGUIThreadInfo(0) still reads the target app (we're not foreground yet)
+        PositionNearCaret();
+
         Show();
         Activate();
-        PositionNearCaret();
 
         // Force foreground so we get keyboard focus
         var hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
@@ -155,10 +171,13 @@ public partial class PickerWindow : Window
     public void HidePicker()
     {
         if (!IsVisible) return;
+        IsOpen = false;
 
         var anim = new DoubleAnimation(1.0, 0.95, TimeSpan.FromMilliseconds(100));
         var opacityAnim = new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(100));
-        opacityAnim.Completed += (s, e) => Hide();
+        // Guard: if the picker was re-shown, the animation got cancelled and this
+        // stale handler must not hide the freshly shown window
+        opacityAnim.Completed += (s, e) => { if (!IsOpen) Hide(); };
         RootBorder.BeginAnimation(OpacityProperty, opacityAnim);
         RootScale.BeginAnimation(ScaleTransform.ScaleXProperty, anim);
         RootScale.BeginAnimation(ScaleTransform.ScaleYProperty, anim);
@@ -393,39 +412,22 @@ public partial class PickerWindow : Window
     }
 
     /// <summary>
-    /// Loads a static frozen first-frame for display. Creates a per-control
-    /// animated BitmapImage only on hover, so at most one GIF animates at a time.
+    /// Loads a static frozen first-frame for display (decoded off the UI thread,
+    /// capped at DecodePixelWidth so decoded size stays bounded regardless of
+    /// source resolution). Hover animation is created on demand from the disk
+    /// cache — at most one GIF animates at a time.
     /// </summary>
     private static async Task LoadThumbnailAsync(
         Image img, string url, Border container)
     {
+        BitmapImage? staticBitmap = null;
         try
         {
-            // Ensure bytes are cached
-            if (!_byteCache.TryGetValue(url, out var bytes))
+            if (!_staticCache.TryGetValue(url, out staticBitmap))
             {
-                bytes = await GifCache.GetOrDownloadAsync(url);
-                _byteCache.TryAdd(url, bytes);
-                if (_byteCache.Count > MaxCachedEntries)
-                    _byteCache.Clear();
-            }
-
-            // Get or create frozen static thumbnail (shared, safe across controls)
-            if (!_staticCache.TryGetValue(url, out var staticBitmap))
-            {
-                staticBitmap = await Task.Run(() =>
-                {
-                    using var ms = new MemoryStream(bytes);
-                    var b = new BitmapImage();
-                    b.BeginInit();
-                    b.CacheOption = BitmapCacheOption.OnLoad;
-                    b.StreamSource = ms;
-                    b.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
-                    b.EndInit();
-                    b.Freeze();
-                    return b;
-                });
-
+                var bytes = await GifCache.GetOrDownloadAsync(url);
+                staticBitmap = await Task.Run(() => CreateStaticThumbnail(bytes));
+                if (staticBitmap == null) return; // decode failed; static placeholder stays
                 _staticCache.TryAdd(url, staticBitmap);
                 if (_staticCache.Count > MaxCachedEntries)
                     _staticCache.Clear();
@@ -436,18 +438,10 @@ public partial class PickerWindow : Window
             // synchronously before the caller adds the element to the panel.
             img.Source = staticBitmap;
 
-            // Animate on hover only — fresh BitmapImage per hover to avoid
-            // WpfAnimatedGif stream-sharing corruption
-            container.MouseEnter += (s, e) =>
-            {
-                if (!_byteCache.TryGetValue(url, out var hovBytes)) return;
-                var animBitmap = CreateAnimatedBitmap(hovBytes);
-                if (animBitmap != null)
-                {
-                    WpfAnimatedGif.ImageBehavior.SetAutoStart(img, true);
-                    WpfAnimatedGif.ImageBehavior.SetAnimatedSource(img, animBitmap);
-                }
-            };
+            // Animate on hover only — bytes come from the disk cache, decode
+            // runs on the thread pool (a full GIF decode on the UI thread
+            // stalled the keyboard hook and scrolling).
+            container.MouseEnter += (s, e) => _ = AnimateOnHoverAsync(img, url, staticBitmap);
 
             container.MouseLeave += (s, e) =>
             {
@@ -458,6 +452,53 @@ public partial class PickerWindow : Window
         catch (Exception ex)
         {
             Log.Error($"Failed to load GIF preview from {url}: {ex.Message}", ex);
+        }
+    }
+
+    private static async Task AnimateOnHoverAsync(Image img, string url, BitmapImage staticBitmap)
+    {
+        try
+        {
+            var bytes = await GifCache.GetOrDownloadAsync(url); // disk-fast when cached
+            var animBitmap = await Task.Run(() => CreateAnimatedBitmap(bytes));
+
+            // Continuations resume on the UI thread (DispatcherSyncContext);
+            // verify the hover is still active before applying.
+            if (animBitmap != null && img.IsMouseOver)
+            {
+                WpfAnimatedGif.ImageBehavior.SetAutoStart(img, true);
+                WpfAnimatedGif.ImageBehavior.SetAnimatedSource(img, animBitmap);
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Error($"Hover animation failed for {url}: {ex.Message}", ex);
+        }
+    }
+
+    /// <summary>
+    /// Decodes a downscaled frozen thumbnail (first frame displayed; the
+    /// DecodePixelWidth cap keeps decoded buffers small and off the LOH).
+    /// </summary>
+    private static BitmapImage? CreateStaticThumbnail(byte[] bytes)
+    {
+        try
+        {
+            using var ms = new MemoryStream(bytes);
+            var b = new BitmapImage();
+            b.BeginInit();
+            b.CacheOption = BitmapCacheOption.OnLoad;
+            b.StreamSource = ms;
+            b.DecodePixelWidth = 150; // cells render at ~100-150px
+            b.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
+            b.EndInit();
+            b.Freeze();
+            return b;
+        }
+        catch (Exception ex)
+        {
+            Log.Error($"Failed to create static thumbnail: {ex.Message}", ex);
+            return null;
         }
     }
 
@@ -773,6 +814,14 @@ public partial class PickerWindow : Window
 
     private void OnDeactivated(object? sender, EventArgs e)
     {
+        var sinceShow = Environment.TickCount64 - _shownAt;
+        if (sinceShow < DeactivationGraceMs)
+        {
+            Log.Info($"Ignored deactivation {sinceShow}ms after show (grace period)");
+            return;
+        }
+
+        Log.Info("Picker deactivated - auto-hiding");
         HidePicker();
     }
 

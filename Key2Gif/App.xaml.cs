@@ -75,6 +75,17 @@ public partial class App : Application
         _pickerWindow = new PickerWindow(_gifService, _recentTracker);
         Log.Info("Picker window created");
 
+        // Warm-up: pre-create the HWND and render surfaces invisibly so the first
+        // real Show() is instant. Without this, first-show init (~200-500ms) overlaps
+        // with activation settling and causes a show/hide/show flash.
+        _pickerWindow.ShowActivated = false;
+        _pickerWindow.Opacity = 0;
+        _pickerWindow.Show();
+        _pickerWindow.Hide();
+        _pickerWindow.Opacity = 1;
+        _pickerWindow.ShowActivated = true;
+        Log.Info("Picker window warmed up");
+
         // Register global hotkey
         Log.Info("Registering global hotkey (LCtrl+Shift+RCtrl via low-level hook)...");
         _hotkeyService = new HotkeyService();
@@ -116,7 +127,7 @@ public partial class App : Application
         {
             if (_pickerWindow == null) return;
 
-            if (_pickerWindow.IsVisible)
+            if (_pickerWindow.IsOpen)
             {
                 Log.Info("Hiding picker");
                 _pickerWindow.HidePicker();

@@ -32,11 +32,32 @@ public class GifService
         return QueryAsync(url, limit, ct);
     }
 
-    public Task<GifSearchResult> GetTrendingAsync(int limit = 40, int offset = 0, CancellationToken ct = default)
+    // First trending page is cached briefly — the picker refetches trending on
+    // every reopen after a search, which costs an API round-trip each time.
+    private GifSearchResult? _trendingCache;
+    private long _trendingCachedAt;
+    private const long TrendingTtlMs = 5 * 60 * 1000;
+
+    public async Task<GifSearchResult> GetTrendingAsync(int limit = 40, int offset = 0, CancellationToken ct = default)
     {
+        if (offset == 0 &&
+            _trendingCache != null &&
+            Environment.TickCount64 - _trendingCachedAt < TrendingTtlMs)
+        {
+            Log.Info("GIPHY trending: served from cache (TTL)");
+            return _trendingCache;
+        }
+
         var url = $"{BaseUrl}/trending?api_key={_apiKey}&limit={limit}&offset={offset}&rating=pg-13";
         Log.Info($"GIPHY trending: limit={limit} offset={offset}");
-        return QueryAsync(url, limit, ct);
+        var result = await QueryAsync(url, limit, ct);
+
+        if (offset == 0)
+        {
+            _trendingCache = result;
+            _trendingCachedAt = Environment.TickCount64;
+        }
+        return result;
     }
 
     private async Task<GifSearchResult> QueryAsync(string url, int limit, CancellationToken ct)

@@ -1,7 +1,6 @@
 using System;
 using System.IO;
 using System.Runtime.InteropServices;
-using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Media.Imaging;
@@ -103,11 +102,17 @@ public static class ClipboardInserter
         var filePath = GifCache.GetFilePath(url);
         Log.Info($"GIF ready ({bytes.Length} bytes)");
 
+        // Heavy decode/encode off the UI thread (keeps the LL keyboard hook
+        // responsive) and BEFORE opening the clipboard (don't hold the global
+        // lock while doing CPU work).
+        var dibBytes = await Task.Run(() => ExtractFirstFrameAsDib(bytes));
+        var pngBytes = await Task.Run(() => ExtractFirstFrameAsPng(bytes));
+
         IDataObject? prevClipboard = null;
         try { prevClipboard = Clipboard.GetDataObject(); }
         catch { }
 
-        try { CopyImageToClipboard(bytes); }
+        try { await CopyImageToClipboard(bytes, dibBytes, pngBytes); }
         catch (Exception ex)
         {
             Log.Error($"Clipboard set failed: {ex.Message}", ex);
@@ -136,7 +141,7 @@ public static class ClipboardInserter
         try { prevClipboard = Clipboard.GetDataObject(); }
         catch { }
 
-        try { CopyFileToClipboard(filePath); }
+        try { await CopyFileToClipboard(filePath); }
         catch (Exception ex)
         {
             Log.Error($"File clipboard set failed: {ex.Message}", ex);
@@ -158,11 +163,13 @@ public static class ClipboardInserter
 
     /// <summary>
     /// Places GIF + DIB on the clipboard (no file paths).
+    /// Frame extraction must already be done — the clipboard is only held
+    /// open for the fast SetClipboardData calls.
     /// </summary>
-    private static void CopyImageToClipboard(byte[] gifBytes)
+    private static async Task CopyImageToClipboard(byte[] gifBytes, byte[]? dibBytes, byte[]? pngBytes)
     {
         var hwnd = GetWindowHandle();
-        if (!TryOpenClipboard(hwnd))
+        if (!await TryOpenClipboardAsync(hwnd))
             throw new InvalidOperationException("Cannot open clipboard");
 
         try
@@ -178,7 +185,6 @@ public static class ClipboardInserter
             }
 
             // 2) CF_DIB — bitmap that Electron/Chrome actually reads
-            var dibBytes = ExtractFirstFrameAsDib(gifBytes);
             if (dibBytes != null)
             {
                 SetRawData(8 /* CF_DIB */, dibBytes); // Windows synthesizes CF_BITMAP, CF_PALETTE
@@ -186,7 +192,6 @@ public static class ClipboardInserter
             }
 
             // 3) PNG — some apps (Office, modern editors) prefer this
-            var pngBytes = ExtractFirstFrameAsPng(gifBytes);
             if (pngBytes != null)
             {
                 uint pngFormat = RegisterClipboardFormat("PNG");
@@ -209,10 +214,10 @@ public static class ClipboardInserter
     /// <summary>
     /// Places CF_HDROP (file path) on the clipboard only.
     /// </summary>
-    private static void CopyFileToClipboard(string filePath)
+    private static async Task CopyFileToClipboard(string filePath)
     {
         var hwnd = GetWindowHandle();
-        if (!TryOpenClipboard(hwnd))
+        if (!await TryOpenClipboardAsync(hwnd))
             throw new InvalidOperationException("Cannot open clipboard");
 
         try
@@ -360,13 +365,18 @@ public static class ClipboardInserter
         return hwnd;
     }
 
-    private static bool TryOpenClipboard(IntPtr hwnd)
+    /// <summary>
+    /// Retries opening the clipboard with async waits so the UI thread keeps
+    /// pumping messages (a blocking Thread.Sleep here would starve the
+    /// low-level keyboard hook past Windows' LowLevelHooksTimeout).
+    /// </summary>
+    private static async Task<bool> TryOpenClipboardAsync(IntPtr hwnd)
     {
         for (int i = 0; i < 10; i++)
         {
             if (OpenClipboard(hwnd))
                 return true;
-            Thread.Sleep(50);
+            await Task.Delay(50);
         }
         return false;
     }
