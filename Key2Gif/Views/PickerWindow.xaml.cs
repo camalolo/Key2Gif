@@ -218,8 +218,11 @@ public partial class PickerWindow : Window
                 if (GetGUIThreadInfo(0, ref info) && info.hwndFocus != IntPtr.Zero)
                 {
                     GetWindowRect(info.hwndFocus, out var focusRect);
+                    // Center horizontally under the focus window (same semantics
+                    // as Strategy 4; anchoring the left edge at center-X made the
+                    // picker hang right-of-center and look misplaced)
                     caretScreen = new Point(
-                        (focusRect.Left + focusRect.Right) / 2.0,
+                        (focusRect.Left + focusRect.Right) / 2.0 - Width / 2,
                         focusRect.Bottom + 4);
                     Log.Info($"Focus rect position: ({focusRect.Left},{focusRect.Top})-({focusRect.Right},{focusRect.Bottom})");
                 }
