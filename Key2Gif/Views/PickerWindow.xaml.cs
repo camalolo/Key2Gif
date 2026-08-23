@@ -110,6 +110,10 @@ public partial class PickerWindow : Window
     private long _shownAt;
     private const long DeactivationGraceMs = 400;
 
+    // Debounced auto-hide: activation churn can Deactivate→Activate within a few
+    // hundred ms. Only hide if the window is STILL inactive after a short delay.
+    private DispatcherTimer? _deactivationCheck;
+
     public void ShowPicker()
     {
         IsOpen = true;
@@ -821,8 +825,24 @@ public partial class PickerWindow : Window
             return;
         }
 
-        Log.Info("Picker deactivated - auto-hiding");
-        HidePicker();
+        // Debounce: churn (OS foreground denial, AttachThreadInput bounce) often
+        // re-activates the window moments later. Re-check before committing to hide.
+        _deactivationCheck?.Stop();
+        _deactivationCheck = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(150) };
+        _deactivationCheck.Tick += (s, _) =>
+        {
+            _deactivationCheck?.Stop();
+            if (IsActive || !IsOpen) return; // re-activated (churn) or already hiding
+            Log.Info("Picker deactivated (stable) - auto-hiding");
+            HidePicker();
+        };
+        _deactivationCheck.Start();
+    }
+
+    private void OnActivated(object? sender, EventArgs e)
+    {
+        // Activation arrived during the debounce window — cancel the pending hide.
+        _deactivationCheck?.Stop();
     }
 
     protected override void OnKeyDown(KeyEventArgs e)
