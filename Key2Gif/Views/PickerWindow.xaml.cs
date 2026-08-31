@@ -153,14 +153,58 @@ public partial class PickerWindow : Window
         if (!IsVisible) return;
         IsOpen = false;
 
+        // Move focus off the TextBox NOW (while still interactive) — its caret-blink
+        // timer otherwise keeps invalidating renders while the window is hidden,
+        // driving MediaContext vsync scheduling forever (idle CPU burn).
+        SearchBox.MoveFocus(new TraversalRequest(FocusNavigationDirection.Next));
+
         var anim = new DoubleAnimation(1.0, 0.95, TimeSpan.FromMilliseconds(100));
         var opacityAnim = new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(100));
         // Guard: if the picker was re-shown, the animation got cancelled and this
         // stale handler must not hide the freshly shown window
-        opacityAnim.Completed += (s, e) => { if (!IsOpen) Hide(); };
+        opacityAnim.Completed += (s, e) =>
+        {
+            if (!IsOpen)
+            {
+                Hide();
+                // Detach completed animation clocks — Filling clocks keep
+                // TimeManager/MediaContext scheduling render passes at idle.
+                RootBorder.BeginAnimation(OpacityProperty, null);
+                RootScale.BeginAnimation(ScaleTransform.ScaleXProperty, null);
+                RootScale.BeginAnimation(ScaleTransform.ScaleYProperty, null);
+                Opacity = 0;
+                RootScale.ScaleX = 0.95;
+                RootScale.ScaleY = 0.95;
+                StopAllGifAnimations();
+            }
+        };
         RootBorder.BeginAnimation(OpacityProperty, opacityAnim);
         RootScale.BeginAnimation(ScaleTransform.ScaleXProperty, anim);
         RootScale.BeginAnimation(ScaleTransform.ScaleYProperty, anim);
+    }
+
+    /// <summary>
+    /// Stops all WpfAnimatedGif animation timers. MouseLeave does not reliably
+    /// fire when the window is hidden, so a hovered GIF's DispatcherTimer would
+    /// otherwise keep decoding frames forever (idle CPU leak).
+    /// </summary>
+    private void StopAllGifAnimations()
+    {
+        var stopped = 0;
+        foreach (var panel in new[] { RecentGifPanel, GifPanel })
+        {
+            foreach (var child in panel.Children.OfType<Border>())
+            {
+                if (child.Child is Image img &&
+                    WpfAnimatedGif.ImageBehavior.GetAnimatedSource(img) != null)
+                {
+                    WpfAnimatedGif.ImageBehavior.SetAnimatedSource(img, null);
+                    stopped++;
+                }
+            }
+        }
+        if (stopped > 0)
+            Log.Info($"Stopped {stopped} GIF animation(s) on hide");
     }
 
     /// <summary>
