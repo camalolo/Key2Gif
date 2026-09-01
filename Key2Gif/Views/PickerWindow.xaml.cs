@@ -96,16 +96,18 @@ public partial class PickerWindow : Window
 
     public void ShowPicker()
     {
+        if (IsOpen) return; // idempotent — no double-show
         IsOpen = true;
         _shownAt = Environment.TickCount64;
+
+        // A pending deactivation-debounce hide from a previous cycle must not
+        // fire right after we re-show
+        _deactivationCheck?.Stop();
 
         // Cancel any in-flight hide animation (M4)
         RootBorder.BeginAnimation(OpacityProperty, null);
         RootScale.BeginAnimation(ScaleTransform.ScaleXProperty, null);
         RootScale.BeginAnimation(ScaleTransform.ScaleYProperty, null);
-        Opacity = 1;
-        RootScale.ScaleX = 1;
-        RootScale.ScaleY = 1;
 
         // Remember which window had focus before we show ourselves
         _lastForegroundWindow = GetForegroundWindow();
@@ -117,17 +119,24 @@ public partial class PickerWindow : Window
         _suppressSearch = false;
         UpdateSearchPlaceholder();
 
-        // Position BEFORE Show: avoids one frame at the stale location
+        // History section first: scroll back to top
+        ContentScroll.ScrollToHome();
+
+        // Position BEFORE Show: avoids one frame at the stale location.
+        // Start fully transparent — the first rendered frame must be invisible,
+        // otherwise ForceForeground's message pumping paints one opaque frame
+        // before the fade-in starts (the show flash).
+        Opacity = 0;
+        RootScale.ScaleX = 0.95;
+        RootScale.ScaleY = 0.95;
+
         PositionBottomRight();
-
         Show();
-        Activate();
 
-        // Force foreground so we get keyboard focus
-        var hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
-        ForceForeground(hwnd);
-
-        // Open animation
+        // Attach fade-in BEFORE Activate/ForceForeground — their message pumping
+        // must never render a visible frame at the wrong opacity.
+        // NOTE: animates the WINDOW's Opacity — the pre-show Opacity=0 above is
+        // on the window, animating the border instead would leave it invisible.
         var anim = new DoubleAnimation(0.95, 1.0, TimeSpan.FromMilliseconds(150))
         {
             EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut }
@@ -136,7 +145,13 @@ public partial class PickerWindow : Window
         RootScale.BeginAnimation(ScaleTransform.ScaleYProperty, anim);
 
         var opacityAnim = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(150));
-        RootBorder.BeginAnimation(OpacityProperty, opacityAnim);
+        BeginAnimation(OpacityProperty, opacityAnim);
+
+        Activate();
+
+        // Force foreground so we get keyboard focus
+        var hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+        ForceForeground(hwnd);
 
         // Focus search box
         Dispatcher.BeginInvoke(() =>
@@ -150,7 +165,7 @@ public partial class PickerWindow : Window
 
     public void HidePicker()
     {
-        if (!IsVisible) return;
+        if (!IsOpen) return; // idempotent — no double-fade restart (show flash)
         IsOpen = false;
 
         // Move focus off the TextBox NOW (while still interactive) — its caret-blink
@@ -169,7 +184,7 @@ public partial class PickerWindow : Window
                 Hide();
                 // Detach completed animation clocks — Filling clocks keep
                 // TimeManager/MediaContext scheduling render passes at idle.
-                RootBorder.BeginAnimation(OpacityProperty, null);
+                BeginAnimation(OpacityProperty, null);
                 RootScale.BeginAnimation(ScaleTransform.ScaleXProperty, null);
                 RootScale.BeginAnimation(ScaleTransform.ScaleYProperty, null);
                 Opacity = 0;
@@ -178,7 +193,7 @@ public partial class PickerWindow : Window
                 StopAllGifAnimations();
             }
         };
-        RootBorder.BeginAnimation(OpacityProperty, opacityAnim);
+        BeginAnimation(OpacityProperty, opacityAnim);
         RootScale.BeginAnimation(ScaleTransform.ScaleXProperty, anim);
         RootScale.BeginAnimation(ScaleTransform.ScaleYProperty, anim);
     }

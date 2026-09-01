@@ -118,7 +118,7 @@
             </Grid>
 
             <!-- Content Area -->
-            <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto"
+            <ScrollViewer x:Name="ContentScroll" Grid.Row="1" VerticalScrollBarVisibility="Auto"
                           HorizontalScrollBarVisibility="Disabled"
                           PreviewMouseLeftButtonUp="OnContentClick"
                           PreviewMouseRightButtonUp="OnContentRightClick">
